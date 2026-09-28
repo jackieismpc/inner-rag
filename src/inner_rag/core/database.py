@@ -1,0 +1,80 @@
+"""数据库引擎、会话工厂与表结构初始化。"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+
+from loguru import logger
+from sqlalchemy import Engine, create_engine, inspect
+from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from sqlalchemy.pool import QueuePool
+
+from inner_rag.core.config import settings
+
+
+class Base(DeclarativeBase):
+    """所有 ORM 模型的基类（SQLAlchemy 2.0 声明式风格）。"""
+
+
+def _create_engine() -> Engine:
+    url = settings.DATABASE_URL
+    if url.startswith("sqlite"):
+        # SQLite 不支持连接池参数，测试场景使用
+        return create_engine(
+            url,
+            connect_args={"check_same_thread": False},
+            echo=settings.SQL_ECHO,
+        )
+    return create_engine(
+        url,
+        poolclass=QueuePool,
+        pool_size=settings.DATABASE_POOL_SIZE,
+        max_overflow=settings.DATABASE_MAX_OVERFLOW,
+        pool_pre_ping=True,
+        pool_recycle=3600,
+        echo=settings.SQL_ECHO,
+    )
+
+
+engine = _create_engine()
+# expire_on_commit=False：commit 之后仍可直接读取已加载属性，
+# 避免在异步生成器等场景因会话已关闭而触发 DetachedInstanceError。
+SessionLocal = sessionmaker(bind=engine, autocommit=False, autoflush=False, expire_on_commit=False)
+
+
+def get_db() -> Iterator[Session]:
+    """FastAPI 依赖：请求级数据库会话。"""
+    db = SessionLocal()
+    try:
+        yield db
+    except Exception as exc:
+        # HTTPException（400/403/404）也会走到这里，不应记成数据库错误
+        db.rollback()
+        logger.debug(f"请求会话回滚: {exc}")
+        raise
+    finally:
+        db.close()
+
+
+def init_db() -> None:
+    """
+    确认表结构就绪。
+
+    生产/开发默认由 Alembic 负责建表（AUTO_CREATE_TABLES=false），
+    缺少表时直接报错并给出修复命令，而不是静默地建出一份可能与迁移脚本不一致的结构。
+    """
+    from inner_rag.models import conversation, document, knowledge_base  # noqa: F401
+
+    if settings.AUTO_CREATE_TABLES:
+        Base.metadata.create_all(bind=engine)
+        logger.info("Database tables created via create_all (AUTO_CREATE_TABLES=true)")
+        return
+
+    missing = sorted(set(Base.metadata.tables) - set(inspect(engine).get_table_names()))
+    if missing:
+        msg = (
+            f"数据库缺少表 {missing}；请先执行 `uv run alembic upgrade head`，"
+            "或临时设置 AUTO_CREATE_TABLES=true"
+        )
+        raise RuntimeError(msg)
+    logger.info("Database schema is up to date")
