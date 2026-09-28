@@ -1,6 +1,6 @@
 # inner-rag
 
-> 多 Provider 的企业知识库问答系统 —— FastAPI + LangChain 1.x + ChromaDB + PostgreSQL
+> 多 Provider 的企业知识库问答系统 —— FastAPI + LangChain 1.x + ChromaDB + SQLite / PostgreSQL
 
 `inner-rag` 是一个完整可跑的 RAG（检索增强生成）知识库系统：把散落的文档（PDF / Word / Excel /
 纯文本，扫描件与图片走 OCR）解析、分块、向量化入库，然后基于「向量检索 + 引用溯源 + 流式问答」
@@ -23,17 +23,19 @@
 1. **升级到最新的 LangChain 生态**（LangChain 1.x / core 1.6+）与匹配的 Python 3.13；
 2. **用 `uv` 管理** Python 版本、依赖与虚拟环境（含 `uv.lock` 锁定）；
 3. **模型后端可插拔**：不只支持 Ollama，也能直接用 OpenRouter / DeepSeek / 任意 OpenAI 兼容端点；
-4. **全面工程化重构**：PostgreSQL 16 + Alembic 迁移、可插拔 OCR、检索质量可观测、测试与 CI 友好的结构。
+4. **全面工程化重构**：Alembic 迁移（开发 SQLite / 部署可切 PostgreSQL）、可插拔 OCR、检索质量可观测、测试与 CI 友好的结构。
 
-阶段划分（详见文末「阶段进展」）：
+阶段划分（详见文末「阶段进展」；完整执行路线与每阶段测试门禁见 `docs/roadmap.md`）：
 
 | 阶段 | 目标 | 状态 |
 | --- | --- | --- |
 | Phase 0 | 建立独立的 uv 项目与 git 基线（src 布局、可按包安装） | ✅ |
 | Phase 1 | 全量升级陈旧 API + 修复必修逻辑缺陷，行为保持稳定 | ✅ |
-| Phase 2 | Provider 抽象层（Ollama / OpenRouter / DeepSeek / OpenAI 兼容） | 待开始 |
+| Phase 1.5 | 开发默认改用 SQLite，密钥统一从 `.env` 读取 | ✅ |
+| Phase 2 | Provider 抽象层（Ollama / OpenRouter / DeepSeek / OpenAI 兼容），API 优先 | 待开始 |
 | Phase 3 | OCR 迁移到视觉大模型（VLM），替代本地 PaddleOCR | 待开始 |
-| Phase 4 | 检索质量评测、Rerank、Redis 缓存、任务队列、CI | 待开始 |
+| Phase 4 | 检索质量评测、Rerank、任务队列、结构化日志 | 待开始 |
+| Phase 5 | 交付：Docker 镜像、PostgreSQL、CI 与部署文档 | 待开始 |
 
 ## 特性
 
@@ -71,7 +73,7 @@ flowchart LR
     VS --> CHROMA[("ChromaDB")]
     VS --> EMB["Embedding Provider"]
     RAG --> LLM["LLM Provider"]
-    KB --> DB[("PostgreSQL 16")]
+    KB --> DB[("SQLite（开发默认）<br/>PostgreSQL（部署）")]
     DOC --> DB
     CHAT --> DB
 ```
@@ -87,7 +89,7 @@ flowchart LR
 | Web 框架 | FastAPI 0.141+、Uvicorn 0.54+、SSE 流式响应 |
 | LLM 编排 | LangChain 1.x（`langchain-core` 1.6+、`langchain-text-splitters`、`langchain-ollama`） |
 | 向量库 | ChromaDB 1.5+（persistent client）/ `langchain-chroma` |
-| 关系库 | PostgreSQL 16 + SQLAlchemy 2.1 + Alembic 1.20 + psycopg 3 |
+| 关系库 | SQLite（开发默认）+ PostgreSQL 16（部署可选）+ SQLAlchemy 2.1 + Alembic 1.20 |
 | 文档解析 | pypdf、PyMuPDF、python-docx、docx2txt、openpyxl、xlrd、Pillow、chardet |
 | 前端 | Vue 3 + Vite + Pinia + Tailwind CSS 3 |
 | 质量 | ruff、pytest（+ pytest-asyncio）、mypy |
@@ -96,10 +98,11 @@ flowchart LR
 
 ### 0. 前置条件
 
-- Linux / macOS（Windows 建议 WSL2）
+- Linux（当前主力开发环境）/ macOS（Windows 建议 WSL2）
 - [uv](https://docs.astral.sh/uv/)（不需要本地预装 Python，uv 会按 `.python-version` 自行安装 3.13）
-- Docker（用于一键拉起 PostgreSQL；也可以指向已有实例）
-- 可选的本地模型服务 [Ollama](https://ollama.com/)（不用 Ollama 时按 Phase 2 配置云端 API）
+- 模型侧二选一：**云端 API（开发阶段推荐，最快）** 需要一个 OpenRouter / DeepSeek 的 key；
+  或本地 [Ollama](https://ollama.com/)（全离线）
+- 数据库：开发默认 SQLite，**无需任何安装**；只有部署阶段才需要 Docker 或一个 PostgreSQL 实例
 
 ```bash
 # 安装 uv
@@ -120,29 +123,24 @@ uv sync                 # 创建 .venv 并按 uv.lock 安装依赖（含 Python 
 uv sync --extra ocr-paddle
 ```
 
-### 2. 启动数据库（PostgreSQL 16）
+### 2. 配置环境变量与密钥
 
 ```bash
-docker compose up -d postgres
+cp .env.example .env      # .env 已被 .gitignore 忽略，不会进仓库
+# 需要改的通常只有：模型 provider 与 key、PORT、CORS_ORIGINS
 ```
 
-不使用 Docker 时，把 `.env` 里的 `DATABASE_URL` 指向任意 PostgreSQL 16 实例即可。
-本地临时体验也可以直接用 SQLite：
+数据库默认就是 SQLite（`sqlite:///./data/inner_rag.db`，单文件、零配置），**开发阶段不需要任何
+数据库服务**。密钥统一写在 `.env` 里（`OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY`），
+代码只从 `.env` 与运行环境变量读取：不要把 key 写进源码，也不要提交 `.env`。
 
-```bash
-DATABASE_URL='sqlite:///./data/local.db' AUTO_CREATE_TABLES=true ...
-```
+> 部署阶段换 PostgreSQL 时，把 `DATABASE_URL` 改成 `postgresql+psycopg://rag:rag@localhost:5432/rag_db`
+> （可 `docker compose up -d postgres` 一键起库），再执行一次 `uv run alembic upgrade head`，代码无需改动。
 
-### 3. 配置环境变量
+### 3. 建表并启动后端
 
-```bash
-cp .env.example .env
-# 按需修改：DATABASE_URL、OLLAMA_BASE_URL / 模型名、PORT、CORS_ORIGINS 等
-```
-
-### 4. 建表并启动后端
-
-表结构由 Alembic 管理（`AUTO_CREATE_TABLES=false`），首次启动前必须先迁移：
+表结构由 Alembic 管理（`AUTO_CREATE_TABLES=false`），首次启动前必须先迁移（SQLite 也会自动建出
+`data/inner_rag.db`）：
 
 ```bash
 uv run alembic upgrade head
@@ -161,14 +159,24 @@ curl -s http://localhost:8010/api/system/health
 > `ollama: false` / `status: degraded` 说明 Ollama 未启动或模型名不对；检索与问答会因此失败，
 > 但知识库、文档等管理接口仍可用。
 
-### 5. 准备本地模型（Ollama 路线）
+### 4. 准备模型
+
+云端 API 路线（key 放 `.env`，provider 开关在 Phase 2 落地，详见 `docs/roadmap.md`）：
+
+```bash
+# .env 中填写，例如：
+# LLM_PROVIDER=openrouter
+# OPENROUTER_API_KEY=...
+```
+
+本地 Ollama 路线：
 
 ```bash
 ollama pull qwen3:14b            # 对话模型
 ollama pull qwen3-embedding:8b   # 向量模型（必须与建库时的 embedding 保持一致）
 ```
 
-### 6. 启动前端
+### 5. 启动前端
 
 ```bash
 cd frontend
@@ -203,13 +211,16 @@ npm run dev        # http://localhost:3000，通过 Vite 代理访问后端 8010
 
 ## 配置说明
 
-全部配置项见 `.env.example`（按 应用 / 服务端 / 数据库 / 模型 / 向量库 / 上传 / OCR / 检索 / 缓存 /
-CORS / 日志 分组）。几个容易踩坑的关键项：
+全部配置项见 `.env.example`（按 应用 / 服务端 / 数据库 / 密钥 / 模型 / 向量库 / 上传 / OCR / 检索 /
+缓存 / CORS / 日志 分组）；本地实际生效的值写在 `.env`（已被 gitignore，不入库）。
+几个容易踩坑的关键项：
 
 | 配置 | 默认值 | 说明 |
 | --- | --- | --- |
 | `PORT` | `8010` | 后端端口（`8000` 在共享机器上常被占用），需与 `frontend/vite.config.js` 代理一致 |
-| `DATABASE_URL` | `postgresql+psycopg://rag:rag@localhost:5432/rag_db` | 支持 `sqlite:///...` 用于临时体验 |
+| `DATABASE_URL` | `sqlite:///./data/inner_rag.db` | 开发默认 SQLite；部署切 `postgresql+psycopg://...` 后重跑 `alembic upgrade head` |
+| `SQLITE_TIMEOUT` | `30` | SQLite 等锁超时（秒）；同时影响 `busy_timeout` |
+| `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` | 空 | 云端 API 密钥，只写在 `.env`，不要提交 |
 | `AUTO_CREATE_TABLES` | `false` | 表结构交给 Alembic；仅测试/一次性库设为 `true` |
 | `OLLAMA_LLM_MODEL` / `OLLAMA_EMBEDDING_MODEL` | `qwen3:14b` / `qwen3-embedding:8b` | embedding 标识会写入知识库并做一致性校验 |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `200` | 分块参数，影响召回粒度 |
@@ -238,9 +249,11 @@ inner-rag/
 │   └── services/             # parser、ocr、embedding、vector_store、rag、cache、retrieval_log
 ├── scripts/                  # 运维与排查脚本 + start.sh
 ├── tests/                    # 离线 pytest 用例（假 embedding / 假 LLM）
+├── docs/                     # 执行路线、测试门禁与阶段记录
 ├── frontend/                 # Vue 3 + Vite 前端
-├── docker-compose.yml        # PostgreSQL 16（默认）/ 后端容器（profile=app）
+├── docker-compose.yml        # 部署用：PostgreSQL 16（默认）/ 后端容器（profile=app）
 ├── Dockerfile
+├── .env.example              # 配置模板（真实的 .env 不入库）
 └── images/                   # 截图
 ```
 
@@ -287,7 +300,7 @@ uv run scripts/query_probe.py <kb_id> "查询词" --strategy hybrid --k 8
 ```bash
 uv run ruff check .            # 静态检查
 uv run ruff format .           # 代码格式化
-uv run pytest                  # 全量测试（离线，不依赖 Ollama / PostgreSQL）
+uv run pytest                  # 全量测试（离线，不依赖 Ollama / 数据库服务）
 uv run pytest -q tests/test_api.py::test_chat_stream_events_and_persistence
 uv run mypy                    # 类型检查（配置见 pyproject.toml 的 [tool.mypy]）
 ```
@@ -304,9 +317,12 @@ uv run alembic check                                 # 校验模型与迁移是�
 uv run alembic downgrade -1                           # 回退一步
 ```
 
-## Docker
+## 部署（后置）
 
-只跑数据库（本地开发最常见）：
+开发阶段用 SQLite + 云端 API 就能跑通全链路，Docker 与 PostgreSQL 是交付阶段的收尾工作
+（见 `docs/roadmap.md` 的 Phase 5）。
+
+只跑数据库（后端仍跑在宿主机上，改代码无需重建镜像）：
 
 ```bash
 docker compose up -d postgres
@@ -365,14 +381,24 @@ cd frontend && npm run build          # 产物在 frontend/dist，可用任意�
 | embedding 换模型无校验 | 静默检索到不同向量空间的向量 | 知识库记录 embedding 标识，写入/检索时校验并给出重建指引 |
 | 前端代理失效 | `baseURL` 写成 `' http://localhost:8000/api'`（含前导空格，且绕过 Vite 代理） | 改为相对路径 `/api`，代理目标统一为后端 `8010` |
 
-### Phase 2 ~ Phase 4：规划中
+### Phase 1.5：数据库改为 SQLite 优先 ✅
+
+- 开发默认 `sqlite:///./data/inner_rag.db`，单文件零依赖；部署时可整体切到 PostgreSQL，代码与迁移不变
+- SQLite 引擎开启 WAL 与 `foreign_keys=ON` 并设置等锁超时：避免并发写入时 `database is locked`，
+  同时让删除知识库的级联清理真实生效
+- 密钥（云端 API key）统一从 `.env` 读取，`.env` 不入库
+
+### Phase 2 ~ Phase 5：规划中
+
+完整执行路线、每阶段交付物与「上传前必须通过的测试门禁」见 `docs/roadmap.md`。概览：
 
 - **Phase 2 Provider 抽象**：`ChatProvider` / `EmbeddingProvider` 工厂，支持 Ollama / OpenRouter /
   DeepSeek / OpenAI 兼容端点，Chat 与 Embedding 独立选型，`/api/system/providers` 健康检查
 - **Phase 3 OCR 升级**：用视觉大模型（OpenRouter / HuggingFace VLM）替代本地 PaddleOCR，
   处理扫描件与图片型 PDF
-- **Phase 4 检索质量与交付**：构建评测集（召回率 / 引用准确率 / 延迟）、引入 Rerank 精排、
-  Redis 缓存与任务队列、CI（ruff + pytest + 镜像构建）
+- **Phase 4 检索质量与工程化**：构建评测集（召回率 / 引用准确率 / 延迟）、Rerank 精排、
+  任务队列与结构化日志
+- **Phase 5 交付**：Docker 镜像 + PostgreSQL 一键部署、CI（ruff + mypy + pytest + 镜像构建）
 
 ## 常见问题
 
@@ -397,6 +423,18 @@ A：表结构由 Alembic 管理，先执行 `uv run alembic upgrade head`（或�
 
 **Q：端口冲突？**
 A：改 `.env` 的 `PORT`，同时改 `frontend/vite.config.js` 的代理目标（或设置 `VITE_API_TARGET`）。
+
+**Q：SQLite 报 `database is locked`？**
+A：连接建立时已开启 WAL 与 `busy_timeout`；若仍偶发，把 `.env` 的 `SQLITE_TIMEOUT` 调大，或避免
+同时上传多个大文件（SQLite 同时只允许一个写事务）。真要并发写入就切 PostgreSQL。
+
+**Q：什么时候需要切 PostgreSQL？**
+A：多进程/多实例部署、并发写入较多、或需要主从备份时。改 `DATABASE_URL` 后重跑
+`uv run alembic upgrade head` 即可，两者共用同一套迁移（`docs/roadmap.md` Phase 5）。
+
+**Q：API key 放哪里？**
+A：只放 `.env`（已被 `.gitignore` 忽略），`.env.example` 里只留空占位。密钥一旦泄漏，
+请立即在对应平台吊销并更换。
 
 ## License
 
