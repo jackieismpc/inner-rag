@@ -1,6 +1,6 @@
 # 可观测性：追踪、日志与指标
 
-对应 `docs/DEVELOPMENT_PLAN.md` 的 **Phase 3**。目标是：一次问答的每一步都能被**计时、归因、回放**，
+对应 `docs/DEVELOPMENT_PLAN.md` 的 **Phase 5**。目标是：一次问答的每一步都能被**计时、归因、回放**，
 线上排障从「翻日志猜」变成「看 trace 定位」。
 
 现状：loguru 同时写 stdout 与 `LOG_DIR/app.log`，检索日志与 Prompt 统计落在
@@ -18,7 +18,7 @@
 | `LOG_PROMPT` | `true` | 是否记录 Prompt 内容；**生产建议 `false`** |
 | `APP_VERSION` | `0.3.0` | 写进 trace 与日志，便于按版本对比指标 |
 
-### 1.2 新增（Phase 3）
+### 1.2 新增（Phase 5）
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
@@ -141,9 +141,9 @@ tags：`["env:<env>", "provider:<provider>", "kind:chat|ingest|eval"]`。
 
 约束：
 
-- 指标是**进程内累计**（单 worker 语义）；多 worker 部署时标注该限制，Phase 8 视情况接 Prometheus；
+- 指标是**进程内累计**（单 worker 语义）；多 worker 部署时标注该限制，Phase 10 视情况接 Prometheus；
 - `/api/system/metrics` 也要遵守「不泄露密钥、不带正文」；
-- 空召回率与 `rag_llm_ttfb_ms` 是 Phase 4 评测与 Phase 6 调优的日常观测重点。
+- 空召回率与 `rag_llm_ttfb_ms` 是 Phase 6 评测与 Phase 8 调优的日常观测重点。
 
 ## 5. 排障 playbook
 
@@ -159,7 +159,7 @@ tags：`["env:<env>", "provider:<provider>", "kind:chat|ingest|eval"]`。
 
 排障统一入口：**拿 `request_id` 串日志 → 拿 `session_id` 找 LangSmith thread → 在 trace 里定位最慢的 span**。
 
-## 6. Phase 3 完成定义（DoD）
+## 6. Phase 5 完成定义（DoD）
 
 1. `/api/chat/send` 在 LangSmith 能看到完整 trace：`retrieve` 与 `llm.generate` 两个子 run，
    含耗时、token 用量、metadata；

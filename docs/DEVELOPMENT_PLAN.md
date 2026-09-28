@@ -14,12 +14,14 @@
 | `docs/testing.md` | 测试分几层、fixture 怎么写、CI 跑什么 |
 | `docs/datasets/dragon_king/` | 真实评测语料（评测集 + 离线短片段 fixture） |
 | `benchmark/`（含其 `README.md`） | 指标怎么算、怎么跑、结果怎么写进 README 基准表 |
+| `AGENTS.md` | Agent 行为纪律：changelog 强制、禁止无效防御、注释/测试规范、push 前自检 |
+| `CHANGELOG.md` | 每次改动的目的 / 方案 / 效果（阶段回溯与面试复述） |
 
-历史阶段（Phase 0–2.1）的执行记录已并入第 2 节与第 9 节（ADR），旧的 `docs/roadmap.md` 已废弃删除。
+历史阶段（Phase 0–2.1）的执行记录见 `CHANGELOG.md` 与第 2 节、第 9 节（ADR），旧的 `docs/roadmap.md` 已废弃删除。
 
 ## 1. 宗旨与不变量
 
-**宗旨**：做一个**企业内部知识库问答系统**——把企业里散落的文档变成可检索、可引用、可审计的知识，
+**宗旨**：做一个**企业级形态的内部知识库问答系统**——把散落的文档变成可检索、可引用、可溯源的知识，
 并且在模型后端、存储、可观测设施上都能随环境替换，而不是绑死在某一家的技术栈上。
 
 四条宗旨（缺一不可，按优先级排序）：
@@ -33,6 +35,10 @@
 4. **可部署（Deployable）**：`uv sync` + 一次迁移就能跑；开发默认 SQLite 单文件，部署切 PostgreSQL；
    代码、迁移脚本、镜像与配置模板对两种库都成立。
 
+**范围说明**：目标是做出**企业级形态**的 RAG 系统（身份、权限、可观测、可评估、可交付），
+但**不追求真实企业的合规与多租户能力**。开发期允许直接调用云端模型 API 以快速迭代
+（同时保留 Ollama 与可插拔接口），不要为了「像企业」而过度设计。
+
 不变量（任何阶段都不许破坏）：
 
 - **配置驱动**：模型后端、数据库、存储路径只从 `.env` / 环境变量读，不接受 HTTP 请求传入后端地址。
@@ -40,6 +46,9 @@
 - **行为契约**：配置错误返回**可读的 503** 并指名该改哪个环境变量；`/api/system/health` 永不 5xx。
 - **离线可用**：默认测试与 CI 不联网、不花钱、不受开发者本机 `.env` 影响；真实调用必须显式开启。
 - **引用可核对**：回答必须带来源（文件 + 位置 + 相关度），且来源要能回溯到原文。
+- **生产级但不做过度设计**：任何实现按生产标准设计（多副本、并发、失败路径）；但**不写没有明确失败场景的防御**，
+  写代码前先想清最优实现，注释写「为什么」而非「是什么」（细则见 `AGENTS.md`）。
+- **变更留痕**：每次 push 前必须更新 `CHANGELOG.md`（记录目的 / 方案 / 效果），细则见第 8 节与 `AGENTS.md`。
 
 ## 2. 现状基线（Phase 0–2.1 已交付）
 
@@ -48,7 +57,7 @@
 | 领域 | 现状 | 缺口 |
 | --- | --- | --- |
 | 模型后端 | `providers/` 抽象层：Chat `ollama / openrouter / deepseek / openai / mock`，Embedding `ollama / openrouter / openai / mock`；实例缓存、探活与模型发现、`ProviderError` → 503 | 插件注册是硬编码分支（`specs._build` + `chat.build_chat_model`），第三方扩展要改源码 |
-| 向量库 | **zvec 为项目选型**（Alibaba 开源嵌入式向量库，见第 9 节 ADR）；当前代码用 ChromaDB 持久化，按知识库分 collection，cosine 空间，三策略检索（similarity / mmr / hybrid），真实相关度 | 没有 `VectorStore` 接口，服务层直接依赖 `langchain-chroma`，换库要改 `services/vector_store.py`；zvec 适配器待 Phase 5 落地 |
+| 向量库 | **zvec 为项目选型**（Alibaba 开源嵌入式向量库，见第 9 节 ADR）；当前代码用 ChromaDB 持久化，按知识库分 collection，cosine 空间，三策略检索（similarity / mmr / hybrid），真实相关度 | 没有 `VectorStore` 接口，服务层直接依赖 `langchain-chroma`，换库要改 `services/vector_store.py`；zvec 适配器待 Phase 4 落地。注意 `hybrid` 策略目前是 `similarity + MMR`，**不是稠密 + 稀疏（BM25）**，命名待澄清 |
 | 关系库 | SQLAlchemy 2.1 + Alembic；SQLite（开发默认，WAL + 外键 + 等锁超时）与 PostgreSQL 共用一套迁移 | 服务层直接写 ORM/会话，没有 repository 边界；无 MySQL 等第三方方言验证 |
 | 缓存 | 进程内 LRU（query cache 按 kb 精确失效 + embedding cache 按 `provider:model` 隔离） | 多 worker 下失效；没有 Redis 等外部后端 |
 | 后台任务 | FastAPI `BackgroundTasks` 解析入库 | 无队列、无重试、无进度、无并发上限 |
@@ -72,6 +81,7 @@
 flowchart TB
     subgraph API["API 层（FastAPI）"]
         MW["中间件：request_id / 访问日志 / 计时"]
+        AUTH["认证与权限：登录态 + 知识库级 ACL"]
         R1["kb / doc / chat / system 路由"]
     end
     subgraph SVC["服务层（与后端无关）"]
@@ -89,6 +99,7 @@ flowchart TB
         P7["OcrBackend"]
         P8["Tracer / Metrics"]
         P9["Evaluator"]
+        P10["Identity / Access"]
     end
     subgraph IMPL["内置实现（Adapters）"]
         A1["ollama / openrouter / deepseek / openai / mock"]
@@ -98,6 +109,7 @@ flowchart TB
         A5["in-process（+ 预留 arq / celery）"]
         A6["none / paddle / vlm"]
         A7["loguru + langsmith（+ 预留 OTLP）"]
+        A8["本地账号 + session/JWT（单租户）"]
     end
     API --> SVC --> PORTS --> IMPL
 ```
@@ -105,11 +117,53 @@ flowchart TB
 插件点契约与「怎么加一个新后端」写在 `docs/architecture.md`；每个插件点都必须有：
 **接口 + 内置实现 + 配置项 + 探活 + 契约测试**，五件套齐全才算「可插拔」。
 
-## 4. 阶段路线（Phase 3–8）
+## 4. 阶段路线（Phase 3–10）
 
 每阶段固定包含：目标 → 主要改动 → 阶段测试 → DoD（完成定义）。门禁见第 5 节。
 
-### Phase 3 — 可观测性：LangSmith 追踪 + 运行日志 + 指标
+> 排序原则：**会把「后期重构成本」转嫁给其它阶段的基建，一律前置**。因此把「身份与访问控制平面」
+> 和「向量库统一到 zvec」放在最前面——它们会改变数据模型、检索链路与既有实现，越晚做返工越大。
+> 检索质量调优（rerank / 查询改写）依赖评测基线，属于正确的后置，不提前。
+
+### Phase 3 — 身份与访问控制平面（单租户 + 登录 + 知识库级 ACL）
+
+**目标**：让「谁在用、能看哪个知识库」成为系统的一等公民，而不是匿名开放。
+
+**主要改动**
+- 认证：本地账号（用户名 + 密码哈希）登录，签发会话 Token（JWT 或服务端 session）；
+  新增 `AuthMiddleware` / FastAPI 依赖，把 `user_id` 注入请求上下文（contextvar），供服务层与日志使用。
+- 数据模型：新增 `users` 表；`knowledge_bases` 增加 `owner_id`；新增知识库 ACL（授权用户）关联表。
+- 权限：知识库级 ACL（owner + 被授权用户）；`/api/kb`、`/api/doc`、`/api/chat` 全部路由
+  校验「当前用户对目标 kb 是否有权限」；无权限返回 403，未登录返回 401。
+- 检索链路带权限边界：只允许在用户有权限的知识库内检索（本期为 kb 级，不做文档级）。
+- 前端：登录页 + 登录态；知识库列表只显示有权限的库。
+- **范围边界（明确不做）**：多租户、部门隔离、文档级权限、SSO/LDAP、审计合规——留作后续可选。
+
+**阶段测试**
+- 离线：未登录访问受保护接口 → 401；访问他人 kb → 403；有权可正常读写；密码哈希不可逆；
+  Token 过期 / 篡改被拒；`/api/system/health` 免鉴权且不 5xx。
+
+**DoD**：两个用户各自只能看到自己的知识库；跨库访问被 403 拦下；未登录被 401 拦下。
+
+### Phase 4 — 向量库统一到 zvec
+
+**目标**：开发与生产都用 zvec，消除「在 Chroma 上写、以后在 zvec 上重验」的重复成本。
+
+**主要改动**
+- 抽出 `VectorStore` 接口（`add_documents / search / delete_kb / delete_document / count`），
+  语义按 `docs/architecture.md` 3.2 节定义（相关度换算、MMR 无分数、阈值过滤计数、元数据标量）；
+- 实现 **zvec 适配器**（Alibaba 开源嵌入式向量库：进程内、零外部服务、HNSW + cosine、WAL 持久化，
+  按可选 extra 安装并锁版本）；
+- `services/vector_store.py` 改为按 `VECTOR_STORE=zvec|chroma` 查表构造（Chroma 保留为兼容实现，
+  跑同一套契约测试）；迁移方式：新建 zvec 库 + 重跑建库，不做原地格式转换；
+- 用同一份评测集对比迁移前后指标（评测基线在 Phase 6 产出前，可先用 `benchmark --mode fixtures` 验证逻辑）。
+
+**阶段测试**：`VectorStore` 契约测试（同一套测试参数化跑 zvec / chroma）；迁移后小库指标不回归。
+
+**DoD**：默认配置 `VECTOR_STORE=zvec` 能跑通「上传 → 检索 → 问答」全链路；zvec 适配器通过全部契约测试；
+接口层不泄漏 zvec 类型。
+
+### Phase 5 — 可观测性：LangSmith 追踪 + 运行日志 + 指标（原 Phase 3）
 
 **目标**：一次问答的每一步（检索/嵌入/组装/生成）都能被计时、归因、回放；线上排障从「看日志猜」
 变成「看 trace 定位」。
@@ -139,7 +193,7 @@ flowchart TB
 **DoD**：一次 `/api/chat/send` 能在 LangSmith 看到完整 trace（父子 run + 耗时 + token 用量），
 本地 JSON 日志能用同一个 request_id 串起全部日志；关闭 LangSmith 时行为与现状一致。
 
-### Phase 4 — 评测体系与准确性基线（龙族真实语料）
+### Phase 6 — 评测体系与准确性基线（龙族真实语料）
 
 **目标**：把「答得准不准」变成数字，并让每次改动可对比。
 
@@ -174,18 +228,14 @@ flowchart TB
 这类别名问题回答必须命中「路明非」，且引用片段确实包含该结论；基线数字同时写入 `docs/evaluation.md`
 的「基线」表与 README 基准表。
 
-### Phase 5 — 可插拔深化（provider / 向量库 / 关系库 / 缓存 / 队列）
+### Phase 7 — 可插拔深化（provider / 关系库 / 缓存 / 队列）
 
 **目标**：把「可插拔」从口号变成可被第三方验证的能力——换后端不改业务代码。
+（向量库的接口化与 zvec 迁移已提前到 Phase 4，本阶段不再重复。）
 
 **主要改动**
 - 统一插件注册：`plugins/registry.py`，内置 provider 走 registry 注册（保留现有名称与配置项），
   预留 `entry_points`（`inner_rag.chat_providers` 等）让外部包注册实现；`specs._build` 改为查表。
-- 向量库抽象：定义 `VectorStore` 接口（`add_documents / similarity_search / delete_kb / count /
-  list_collections`），**zvec 作为目标实现**（Alibaba 开源嵌入式向量库：进程内、零外部服务、
-  HNSW + cosine、WAL 持久化，按可选 extra 安装），Chroma 保留为兼容实现；两者跑同一套契约测试，
-  再预留 pgvector adapter 骨架。迁移方式：新建 zvec 库 + 重跑建库（不做原地格式转换），
-  用同一份评测集对比迁移前后指标。
 - 关系库抽象：`repositories/`（KnowledgeBaseRepository / DocumentRepository / ConversationRepository），
   服务层只依赖接口；Alembic 仍为唯一 schema 来源；确保 SQLite 与 PostgreSQL 行为一致（含并发写）。
 - 缓存抽象：`CacheBackend` 接口 + 内存实现，预留 Redis（无 Redis 时自动降级）。
@@ -196,10 +246,10 @@ flowchart TB
 **阶段测试**：每个插件点的契约测试套件（同一组测试跑内置与假 adapter）；配置非法时的可读报错；
 `docs/architecture.md` 的「新增后端步骤」必须能被照着做完（作为人工 DoD）。
 
-**DoD**：zvec 适配器通过全部契约测试（这是第一个真实第三方实现），且「同一语料在 zvec 上重建后
-小库指标不回归（G3）」；业务代码零改动；`/api/system/providers` 与 health 能反映插件状态。
+**DoD**：至少一个真实第三方实现通过全部契约测试（zvec 已在 Phase 4 完成）；业务代码零改动；
+`/api/system/providers` 与 health 能反映插件状态。
 
-### Phase 6 — 检索与回答质量提升（用评测集驱动）
+### Phase 8 — 检索与回答质量提升（用评测集驱动）
 
 **目标**：在固定评测集上把检索与回答指标实打实地推上去，而不是凭感觉调参。
 
@@ -217,7 +267,7 @@ flowchart TB
 引用命中率 ≥ 0.8、拒答正确率 ≥ 0.9），并在 `docs/evaluation.md` 记录前后数字、在 README 基准表里
 留下「改动前 / 改动后」两行。
 
-### Phase 7 — 文档面扩展与 OCR/VLM
+### Phase 9 — 文档面扩展与 OCR/VLM
 
 **目标**：扫描件、图片、复杂表格也能进索引，且不引入重型本地依赖。
 
@@ -233,7 +283,7 @@ flowchart TB
 
 **DoD**：上传一张扫描件，文档 `completed` 且能检索到图中文字；OCR 步骤在 trace 中可见并有成本字段。
 
-### Phase 8 — 交付：Docker / PostgreSQL / CI / 性能与成本
+### Phase 10 — 交付：Docker / PostgreSQL / CI / 性能与成本
 
 **目标**：换一台干净机器按 README 10 分钟跑起来，且关键质量指标不退化。
 
@@ -253,7 +303,7 @@ CI 在 PR 上全绿。
 
 ## 5. 测试门禁（Gate）
 
-四级门禁：**G0 每次提交**、**G1 阶段上传前**、**G2 阶段人工验收**、**G3 评测门禁**（Phase 4 起生效）。
+四级门禁：**G0 每次提交**、**G1 阶段上传前**、**G2 阶段人工验收**、**G3 评测门禁**（Phase 6 起生效）。
 任何一级失败都不提交、不推送；不满足的项必须在提交说明里写明原因与补救计划。
 
 ### G0 — 每次提交（秒级）
@@ -299,14 +349,18 @@ curl --noproxy '*' -sf localhost:8011/api/system/health
 curl --noproxy '*' -sf -o /dev/null localhost:8011/openapi.json && echo "openapi ok"
 kill $SRV
 
-# 5) 密钥与敏感文件自检（只应有 ok 行）
+# 5) 变更留痕自检（AGENTS.md §1.1：本分支改动必须在 CHANGELOG.md 有对应条目）
+git --no-pager diff --name-only origin/main...HEAD
+#   人工核对：上面每个代码 / 文档 / 配置改动，CHANGELOG.md 是否已有条目；没有就先补
+
+# 6) 密钥与敏感文件自检（只应有 ok 行）
 git ls-files | grep -E '(^|/)\.env$' && echo "ERROR: .env 被跟踪" || echo "ok: .env 未被跟踪"
 git check-ignore -q .env && echo "ok: .env 已被 gitignore 忽略" || echo "WARN: .env 未被忽略"
 FOUND=$(git --no-pager diff HEAD | grep -cE '(API|SECRET|TOKEN)_KEY=[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,}')
 [ "$FOUND" = "0" ] && echo "ok: diff 无密钥" || echo "ERROR: diff 里疑似密钥 $FOUND 处"
 ```
 
-Phase 3 起把上述步骤固化为 `scripts/gates.sh`（`--level g0|g1|g2`），避免手抄出错。
+上述步骤已固化为 `scripts/gates.sh`（`--level g0|g1|g2`，G1 内含 changelog 检查），避免手抄出错。
 
 ### G2 — 阶段人工验收（真实链路，每阶段至少一次）
 
@@ -320,12 +374,12 @@ curl --noproxy '*' -s localhost:8010/api/system/health
 # 上传 docs/samples/acceptance.txt → 提问 → 检查 sources 与 done 的答案确实来自文档
 ```
 
-Phase 4 起，G2 还必须包含**龙族小库**上的问答验收（见 `docs/evaluation.md` 的执行三级）。
+Phase 6 起，G2 还必须包含**龙族小库**上的问答验收（见 `docs/evaluation.md` 的执行三级）。
 
-### G3 — 评测门禁（Phase 4 起）
+### G3 — 评测门禁（Phase 6 起）
 
 在小库评测集上跑 `uv run python -m benchmark.run_bench --mode kb --kb-id <小库> --answer --update-readme`
-（Phase 4 之后同一入口也能跑 `scripts/eval_answer.py`），与 `docs/evaluation.md` 记录的基线和
+（Phase 6 之后同一入口也能跑 `scripts/eval_answer.py`），与 `docs/evaluation.md` 记录的基线和
 README 基准表对比：
 
 - 不得回归：Recall@8、引用命中率、答案要点命中率任一下降 > 2pp 视为失败；
@@ -337,13 +391,15 @@ README 基准表对比：
 
 | 里程碑 | 内容 | 完成证据 |
 | --- | --- | --- |
-| M1 可观测 | Phase 3 | LangSmith trace 链接 + 一次请求的 request_id 日志串联 + `metrics` 输出 |
-| M2 可评估 | Phase 4 | `docs/reports/eval-*.md` 报告 + 基线表 + 评测脚本离线单测 |
-| M3 可插拔 | Phase 5 | zvec 适配器通过契约测试的 CI 记录 + 迁移后小库指标不回归 + 扩展指南与演练记录 |
-| M4 质量提升 | Phase 6 | 小库指标对照表（改动前/后），G3 通过 |
-| M5 交付 | Phase 8 | 干净机器部署记录 + CI 绿 + 成本/延迟数字 |
+| M0 权限 | Phase 3 | 两个用户互相看不到对方知识库；跨库 403、未登录 401 的用例 |
+| M1 向量库统一 | Phase 4 | `VECTOR_STORE=zvec` 跑通全链路 + 契约测试全绿 + 迁移后指标不回归 |
+| M2 可观测 | Phase 5 | LangSmith trace 链接 + 一次请求的 request_id 日志串联 + `metrics` 输出 |
+| M3 可评估 | Phase 6 | `docs/reports/eval-*.md` 报告 + 基线表 + 评测脚本离线单测 |
+| M4 可插拔 | Phase 7 | provider / 关系库 / 缓存 / 队列的契约测试 CI 记录 + 扩展指南与演练记录 |
+| M5 质量提升 | Phase 8 | 小库指标对照表（改动前/后），G3 通过 |
+| M6 交付 | Phase 10 | 干净机器部署记录 + CI 绿 + 成本/延迟数字 |
 
-（Phase 7 OCR/VLM 按需插在 M4 前后，不阻塞主线。）
+（Phase 9 OCR/VLM 按需插在 M5 前后，不阻塞主线。）
 
 ## 7. 风险登记簿
 
@@ -359,13 +415,16 @@ README 基准表对比：
 | 向量库从 Chroma 迁到 zvec | 存量知识库需重建；行为差异可能改变召回 | 先补 `VectorStore` 契约测试再实现 zvec adapter；迁移用「重跑建库 + 小库指标对比」，不回归才切默认；Chroma 实现保留一个版本可回退 |
 | zvec 上游仍在快速迭代 | SDK/接口变更 | 依赖走可选 extra 并锁版本；适配器只实现在 `VectorStore` 内部，接口层不泄漏 zvec 类型 |
 | 本机无 Node/npm、无 docker socket 权限 | 前端构建与镜像无法本地验证 | 前端改动限制在最小范围；镜像验证交给 CI 或具备权限的机器，README 写明 |
-| SQLite 并发写入 | `database is locked` | 已开 WAL + `busy_timeout`；上传并发受限；需要并发就切 PostgreSQL（Phase 8 实测） |
+| SQLite 并发写入 | `database is locked` | 已开 WAL + `busy_timeout`；上传并发受限；需要并发就切 PostgreSQL（Phase 10 实测） |
+| 权限改造范围蔓延 | 拖慢主线、复杂度上升 | Phase 3 明确只做「单租户 + 本地登录 + 知识库级 ACL」，多租户 / SSO / 审计不做 |
 | 迁移漂移 | 部署时炸 | G1 固定跑 `alembic check`；任何 schema 变更必须带 revision |
 
 ## 8. 提交与推送规范
 
 - 小步、分主题提交（feat / fix / docs / test / refactor），信息说清「改了什么 / 为什么 / 怎么验证的」；
 - 每个 commit 末尾必须带 `Co-Authored-By: Warp <agent@warp.dev>`；
+- **changelog 强制**：push 前必须在 `CHANGELOG.md` 顶部补上本次改动的条目（目的 / 方案 / 效果 / 涉及提交），
+  并逐项核对本分支改动是否都已记录（细则见 `AGENTS.md` §1.1）；
 - 提交前跑 G0（阶段收尾跑 G1，涉及检索/回答质量再加 G3）；
 - 文档同步：新增配置项必须进 `.env.example`；阶段结论进 `docs/`（评测报告进 `docs/reports/`）；
 - push 前 `git status -sb` 确认无未跟踪的敏感文件，push 后确认与 `origin/main` 同步；
@@ -375,11 +434,12 @@ README 基准表对比：
 
 | 决策 | 结论 | 理由 |
 | --- | --- | --- |
+| 身份与访问控制 | **单租户 + 本地账号登录 + 知识库级 ACL**（前置到 Phase 3）；不做多租户 / SSO / 审计 | 「谁不能看哪个库」是企业场景的刚需，且会改数据模型与检索链路，必须早期做；多租户与 SSO 成本高、不阻塞主线，明确不做以避免过度设计 |
 | 模型后端组织方式 | 自建 `providers/` + `ProviderSpec` 元数据表 | 需要「配置错误给出可读提示」与「身份（provider:model）锁定向量空间」，直接用 LangChain `init_chat_model` 拿不到这层语义 |
 | 追踪后端 | LangSmith（官方 SaaS），无 Key 自动关闭 | 与 LangChain 原生集成、零侵入拿到 run 树；自研 tracing 成本高；离线场景必须有降级路径 |
 | 向量库 | **zvec（Alibaba 开源嵌入式向量库）为项目选型**，抽象成 `VectorStore` 接口，Chroma 为兼容实现 | 定位「向量库里的 SQLite」：进程内嵌入、零外部服务、HNSW + cosine、WAL 持久化，与 SQLite 单文件开发模型一致；接口化后也便于换 pgvector；存量 Chroma 数据用重跑建库迁移，不做原地转换 |
 | 关系库 | SQLite 优先、PostgreSQL 可达，共用 Alembic | 开发零依赖、部署可扩展；两者行为差异用同一套迁移与测试兜住 |
 | 评测语料 | 龙族真实小说，双库（小库 / 全库）+ 短片段 fixture | 真实语料才能暴露别名与长文检索问题；小库保证可自动回归，版权与体积问题用「不入库原文」规避 |
 | 评测方法 | 指标 + LLM-as-judge + 引用锚点校验 | 纯关键词容易漏判，纯 judge 又会漂移；引用锚点让「答对但没依据」也能被发现 |
-| OCR | 可插拔：`none`（默认）/ `paddle`（本地）/ `vlm`（云端，Phase 7） | 不把重依赖强加给所有部署；只有扫描件场景才付成本 |
+| OCR | 可插拔：`none`（默认）/ `paddle`（本地）/ `vlm`（云端，Phase 9） | 不把重依赖强加给所有部署；只有扫描件场景才付成本 |
 | 版本与兼容 | 配置项向后兼容；`embedding_key` 变更必须重建索引并提示 | 避免「跨向量空间静默检索」这种最难查的错 |

@@ -16,7 +16,7 @@
 
 `citations[].page` 与 `fixtures/index.jsonl` 的 `page` 都是 **PyMuPDF 1-based 物理页索引**
 （`doc[p - 1]`），不是书里的印刷页码——本 PDF 没有可靠的印刷页码对应关系。
-对外展示的引用位置走分块元数据的 `page_start` / `page_end`（Phase 4 增补）。
+对外展示的引用位置走分块元数据的 `page_start` / `page_end`（Phase 6 增补）。
 
 ## 校验
 

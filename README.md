@@ -81,7 +81,7 @@ flowchart LR
 | 语言 / 包管理 | Python 3.13（uv 管理）、`uv.lock` 锁定依赖 |
 | Web 框架 | FastAPI 0.141+、Uvicorn 0.54+、SSE 流式响应 |
 | LLM 编排 | LangChain 1.x（`langchain-core` 1.6+、`langchain-text-splitters`）+ `langchain-ollama`（本地）/ `langchain-openai`（OpenAI 兼容云端）/ `langchain-deepseek`（DeepSeek 官方集成） |
-| 向量库 | **zvec**（Alibaba 开源、嵌入式、HNSW + cosine，本项目选型）；当前代码仍为 ChromaDB 1.5+（persistent client）/ `langchain-chroma`，按 Phase 5 迁移 |
+| 向量库 | **zvec**（Alibaba 开源、嵌入式、HNSW + cosine，本项目选型）；当前代码仍为 ChromaDB 1.5+（persistent client）/ `langchain-chroma`，按 Phase 4 迁移 |
 | 关系库 | SQLite（开发默认）+ PostgreSQL 16（部署可选）+ SQLAlchemy 2.1 + Alembic 1.20 |
 | 文档解析 | pypdf、PyMuPDF、python-docx、docx2txt、openpyxl、xlrd、Pillow、chardet |
 | 前端 | Vue 3 + Vite + Pinia + Tailwind CSS 3 |
@@ -90,7 +90,7 @@ flowchart LR
 > **向量库选型**：本项目明确选用 **zvec**（[Alibaba 开源](https://github.com/alibaba/zvec)的嵌入式向量库，
 > Apache-2.0，定位「向量库里的 SQLite」：进程内嵌入、无需独立服务、HNSW + cosine、WAL 持久化、支持多进程并发读），
 > 理由是「零运维」，与 SQLite 单文件开发模型一致。当前代码落盘用的仍是 ChromaDB，两者受同一个 `VectorStore`
-> 契约约束（见 `docs/architecture.md` 3.2），迁移步骤与验收标准见 `docs/DEVELOPMENT_PLAN.md`（Phase 5）。
+> 契约约束（见 `docs/architecture.md` 3.2），迁移步骤与验收标准见 `docs/DEVELOPMENT_PLAN.md`（Phase 4）。
 
 ## 快速开始
 
@@ -393,7 +393,7 @@ uv run python -m benchmark.run_bench --mode kb --kb-id 3 --answer --update-readm
 
 ## 部署
 
-开发阶段用 SQLite + 云端 API 就能跑通全链路（见 `docs/DEVELOPMENT_PLAN.md` 的 Phase 8）。
+开发阶段用 SQLite + 云端 API 就能跑通全链路（见 `docs/DEVELOPMENT_PLAN.md` 的 Phase 10）。
 
 只跑数据库（后端仍跑在宿主机上，改代码无需重建镜像）：
 
@@ -464,7 +464,7 @@ A：连接建立时已开启 WAL 与 `busy_timeout`；若仍偶发，把 `.env` 
 
 **Q：什么时候需要切 PostgreSQL？**
 A：多进程/多实例部署、并发写入较多、或需要主从备份时。改 `DATABASE_URL` 后重跑
-`uv run alembic upgrade head` 即可，两者共用同一套迁移（见 `docs/DEVELOPMENT_PLAN.md` 的 Phase 8）。
+`uv run alembic upgrade head` 即可，两者共用同一套迁移（见 `docs/DEVELOPMENT_PLAN.md` 的 Phase 10）。
 
 **Q：API key 放哪里？**
 A：只放 `.env`（已被 `.gitignore` 忽略），`.env.example` 里只留空占位。密钥一旦泄漏，
@@ -475,8 +475,9 @@ A：只放 `.env`（已被 `.gitignore` 忽略），`.env.example` 里只留空�
 - **已完成**：多 Provider 抽象层（Chat / Embedding 独立选型、OpenRouter / DeepSeek 官方集成、`mock`
   降级路径、`/api/system/providers`）、SQLite 优先与密钥外置、Alembic 迁移、Docker 资产
 - **进行中**：开发文档体系（`docs/DEVELOPMENT_PLAN.md` 及其子文档）、龙族真实评测集与 `benchmark/` 指标脚本
-- **Phase 3–8**：可观测性（LangSmith 追踪 + 运行日志与指标）→ 评测体系与准确性基线 → 可插拔深化
-  （provider 注册表、向量库迁移到 zvec、关系库 / 缓存 / 队列抽象）→ 用评测集驱动检索与回答质量提升 →
+- **Phase 3–10**：身份与访问控制（单租户登录 + 知识库级 ACL）→ 向量库统一到 zvec → 可观测性
+  （LangSmith 追踪 + 运行日志与指标）→ 评测体系与准确性基线 → 可插拔深化
+  （provider 注册表、关系库 / 缓存 / 队列抽象）→ 用评测集驱动检索与回答质量提升 →
   OCR / VLM 文档面扩展 → 交付（Docker / PostgreSQL / CI）
 
 每个阶段的交付物、完成定义、测试门禁（G0–G3）与里程碑见 `docs/DEVELOPMENT_PLAN.md`。

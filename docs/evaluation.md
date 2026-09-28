@@ -1,6 +1,6 @@
 # 评测体系：怎么量化「答得准不准」
 
-对应 `docs/DEVELOPMENT_PLAN.md` 的 **Phase 4**（基线）与 **Phase 6**（提升）。
+对应 `docs/DEVELOPMENT_PLAN.md` 的 **Phase 6**（基线）与 **Phase 8**（提升）。
 评测语料是真实中文长篇小说 `data/uploads/龙族.pdf`（11,165 页 / 2,362,491 字符），
 评测集与离线短片段放在 `docs/datasets/dragon_king/`。
 
@@ -102,7 +102,7 @@ uv run scripts/build_eval_kb.py --profile full --name dragon_king_full
 自动调用（有 PDF 就逐条验证 `quote` 能在对应页命中，没 PDF 只做 schema 校验并打印 `[skip]`）；
 `tests/test_benchmark_metrics.py::test_eval_anchors_match_source_pdf` 在本地有 PDF 时把同一件事跑成回归用例。
 不通过就让评测直接失败——否则「评测集自己写错」会被当成模型答错，最误导人。
-（Phase 4 计划里的 `scripts/validate_eval_set.py` 只是它的薄包装，不再重复实现校验逻辑。）
+（Phase 6 计划里的 `scripts/validate_eval_set.py` 只是它的薄包装，不再重复实现校验逻辑。）
 
 **页码口径**：`page` 是 PyMuPDF 的 1-based 物理页索引，不是印刷页码。
 本 PDF 无印刷页码对应关系，故统一用物理页并在 README 中注明。（真正的引用展示走
@@ -159,7 +159,7 @@ uv run scripts/build_eval_kb.py --profile full --name dragon_king_full
 
 ### 4.3 与代码的接口约定
 
-- 分块元数据必须含 `page_start` / `page_end`（Phase 4 增补，见 `docs/DEVELOPMENT_PLAN.md` 第 4 节）；
+- 分块元数据必须含 `page_start` / `page_end`（Phase 6 增补，见 `docs/DEVELOPMENT_PLAN.md` 第 4 节）；
 - 检索结果沿用现有契约：`(Document, relevance|None)` + 被阈值滤掉的条数；
 - 回答与来源沿用现有 SSE/JSON 结构（`sources` 含 `index/filename/page/score/doc_id/content`），
   评测脚本只读这些结构，**不额外给后端加评测专用分支**。
@@ -183,7 +183,7 @@ uv run scripts/build_eval_kb.py --profile full --name dragon_king_full
 | --- | --- | --- | --- | --- | --- |
 | L1 离线 fixture | 仓库内短片段 | 不需要 | 评测逻辑正确性、CI 门禁 | `uv run python -m benchmark.run_bench --mode fixtures`（+ `pytest -q tests/test_benchmark_metrics.py`） | 每次提交 |
 | L2 live 小库 | 本地 PDF 小库 | 需要 provider Key | 真实指标、回归对比、G3 门禁 | `uv run python -m benchmark.run_bench --mode kb --kb-id <小库> --answer --update-readme` | 每次阶段收尾 / 改动检索与 Prompt 时 |
-| L3 全库人工 | 本地 PDF 全库 | 需要 | 里程碑验收、规模与成本 | 同上，`--kb-id <全库>`；Phase 4 起再用 `scripts/eval_answer.py` 出完整报告 | 里程碑 |
+| L3 全库人工 | 本地 PDF 全库 | 需要 | 里程碑验收、规模与成本 | 同上，`--kb-id <全库>`；Phase 6 起再用 `scripts/eval_answer.py` 出完整报告 | 里程碑 |
 
 L3 不只看自动指标：抽 10 题人工核对引用页码是否真的能翻到该内容。
 
@@ -205,9 +205,9 @@ L3 不只看自动指标：抽 10 题人工核对引用页码是否真的能翻�
 
 | 基线 | 日期 | 配置 | Recall@8 | 引用命中率 | 要点命中率 | 拒答正确率 | 报告 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| baseline-0 | 待 Phase 4 产出 | 默认配置 + 小库 | — | — | — | — | — |
+| baseline-0 | 待 Phase 6 产出 | 默认配置 + 小库 | — | — | — | — | — |
 
-（Phase 4 完成后填第一行；Phase 6 的每次提升追加新行，永不删旧行——历史数字是判断趋势的唯一依据。）
+（Phase 6 完成后填第一行；Phase 8 的每次提升追加新行，永不删旧行——历史数字是判断趋势的唯一依据。）
 
 ### 6.3 LangSmith 联动（可选）
 
@@ -234,7 +234,7 @@ L3 不只看自动指标：抽 10 题人工核对引用页码是否真的能翻�
 2. 同一行的完整版本（逐题明细 + 配置快照）落在 `benchmark/results/*.json`（回溯用）；
 3. 里程碑节点把关键数字摘进第 6.2 节的基线表（长期档案，永不删旧行）。
 
-留给 Phase 4 的部分：LLM-as-judge 正确性与忠实度、token/成本字段、`docs/reports/*.md` 报告、LangSmith
+留给 Phase 6 的部分：LLM-as-judge 正确性与忠实度、token/成本字段、`docs/reports/*.md` 报告、LangSmith
 experiment 回写。`benchmark` 的 fixtures 模式**不允许**写 README——自检分数不是成绩。
 
 ## 7. 门禁（G3）
@@ -243,7 +243,7 @@ experiment 回写。`benchmark` 的 fixtures 模式**不允许**写 README——
 
 - **不得回归**：Recall@8、引用命中率、要点命中率任一下降 > **2pp** 视为失败，不允许合入；
 - **拒答**：负样本正确拒答率 ≥ **90%**，且误拒率不得上升；
-- **目标（Phase 6 收尾）**：Recall@8 ≥ **0.8**、引用命中率 ≥ **0.8**、拒答正确率 ≥ **0.9**；
+- **目标（Phase 8 收尾）**：Recall@8 ≥ **0.8**、引用命中率 ≥ **0.8**、拒答正确率 ≥ **0.9**；
 - 任何调参提交必须附「改动前 / 改动后」两列数字与同一 config 快照。
 
 ## 8. 评测代码自身的测试
