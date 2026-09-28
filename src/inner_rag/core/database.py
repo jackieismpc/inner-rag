@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
+from typing import Any
 
 from loguru import logger
-from sqlalchemy import Engine, create_engine, inspect
+from sqlalchemy import Engine, create_engine, event, inspect
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import QueuePool
 
@@ -19,12 +20,27 @@ class Base(DeclarativeBase):
 def _create_engine() -> Engine:
     url = settings.DATABASE_URL
     if url.startswith("sqlite"):
-        # SQLite 不支持连接池参数，测试场景使用
-        return create_engine(
+        # SQLite 不走连接池参数；timeout 即等锁超时，避免并发写入直接报 database is locked
+        engine = create_engine(
             url,
-            connect_args={"check_same_thread": False},
+            connect_args={
+                "check_same_thread": False,
+                "timeout": settings.SQLITE_TIMEOUT,
+            },
             echo=settings.SQL_ECHO,
         )
+
+        @event.listens_for(engine, "connect")
+        def _set_sqlite_pragmas(dbapi_connection: Any, _connection_record: Any) -> None:
+            # WAL：读写并发（后台解析入库时仍能正常查询）
+            # foreign_keys：SQLite 默认不强制外键，不开启则删除知识库不会级联清理
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.execute(f"PRAGMA busy_timeout={settings.SQLITE_TIMEOUT * 1000}")
+            cursor.close()
+
+        return engine
     return create_engine(
         url,
         poolclass=QueuePool,

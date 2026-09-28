@@ -3,7 +3,7 @@
 所有测试都在离线环境运行：
 * embedding 用确定性的假实现替换，不访问 Ollama；
 * LLM 用 RunnableLambda 替换，不访问网络；
-* 数据库用临时 SQLite 文件（生产/开发默认是 PostgreSQL）。
+* 数据库用临时 SQLite 文件（与开发默认一致，部署时可换 PostgreSQL）。
 """
 
 from __future__ import annotations
@@ -97,7 +97,7 @@ def offline_providers() -> Iterator[None]:
 
 @pytest.fixture(scope="session", autouse=True)
 def database() -> None:
-    # 测试库用 create_all（AUTO_CREATE_TABLES=true）建表，避开对 PostgreSQL 的依赖
+    # 测试库用 create_all（AUTO_CREATE_TABLES=true）建表，避免测试依赖 alembic 迁移
     init_db()
 
 

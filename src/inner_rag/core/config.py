@@ -26,9 +26,14 @@ class Settings(BaseSettings):
     PORT: int = 8010
 
     # ── Database ───────────────────────────────────────────────────────
-    DATABASE_URL: str = "postgresql+psycopg://rag:rag@localhost:5432/rag_db"
+    # 开发默认 SQLite：零依赖、单文件，gitignore 在 data/ 下。
+    # 部署时可整库换成 PostgreSQL（postgresql+psycopg://...），代码与迁移脚本对两者兼容。
+    DATABASE_URL: str = "sqlite:///./data/inner_rag.db"
+    # 仅 PostgreSQL 使用（SQLite 会忽略这些池参数）
     DATABASE_POOL_SIZE: int = 10
     DATABASE_MAX_OVERFLOW: int = 20
+    # SQLite 等锁超时（秒）：后台解析入库与前台查询可能并发写入
+    SQLITE_TIMEOUT: int = 30
     # 表结构由 Alembic 管理；仅测试或一次性临时库才开启 create_all
     AUTO_CREATE_TABLES: bool = False
     SQL_ECHO: bool = False
@@ -97,9 +102,24 @@ class Settings(BaseSettings):
         """当前 embedding 的身份标识，写入知识库并用于向量空间一致性校验。"""
         return f"ollama:{self.OLLAMA_EMBEDDING_MODEL}"
 
+    @property
+    def sqlite_file_path(self) -> Path | None:
+        """SQLite 文件路径（内存库或非 SQLite 返回 None）。"""
+        prefix = "sqlite:///"
+        if not self.DATABASE_URL.startswith(prefix):
+            return None
+        raw = self.DATABASE_URL[len(prefix) :]
+        if not raw or raw.startswith(":memory:"):
+            return None
+        return Path(raw)
+
     def ensure_dirs(self) -> None:
         for directory in (self.UPLOAD_DIR, self.CHROMA_PERSIST_DIR, self.LOG_DIR):
             Path(directory).mkdir(parents=True, exist_ok=True)
+        # SQLite 不会自己建目录，缺少父目录时会报 unable to open database file
+        sqlite_path = self.sqlite_file_path
+        if sqlite_path is not None:
+            sqlite_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 settings = Settings()
