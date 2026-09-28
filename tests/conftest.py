@@ -25,6 +25,12 @@ os.environ.update(
         "OCR_BACKEND": "none",
         "LOG_RETRIEVAL": "false",
         "LOG_PROMPT": "false",
+        # provider 配置必须与开发者本机的 .env 解耦（os.environ 优先于 .env）：
+        # 否则本地一把 provider 切到云端（或打开截断），「离线测试」就会随本机配置漂移，
+        # 甚至真的发出网络请求。需要其他 provider 的用例自行 monkeypatch settings。
+        "LLM_PROVIDER": "mock",
+        "EMBEDDING_PROVIDER": "mock",
+        "EMBEDDING_MAX_INPUT_CHARS": "0",
     }
 )
 
@@ -80,8 +86,20 @@ def fake_llm() -> RunnableLambda:
 
 
 @pytest.fixture(autouse=True)
-def offline_providers() -> Iterator[None]:
-    """把 embedding / LLM 换成离线假实现，并清空缓存，保证测试互不影响。"""
+def offline_providers(request: pytest.FixtureRequest) -> Iterator[None]:
+    """把 embedding / LLM 换成离线假实现，并清空缓存，保证测试互不影响。
+
+    带 ``@pytest.mark.live`` 的用例是真实 provider 冒烟测试，跳过替换，
+    否则它们会拿假模型去验证真 API。
+    """
+    if request.node.get_closest_marker("live") is not None:
+        query_cache._cache.clear()
+        embedding_cache._cache.clear()
+        yield
+        query_cache._cache.clear()
+        embedding_cache._cache.clear()
+        return
+
     original_embeddings = embedding_service._embeddings
     original_get_llm = rag_service._get_llm
     embedding_service._embeddings = FakeEmbeddings()
