@@ -24,6 +24,66 @@
 
 ---
 
+## [Phase 3] 2026-09-28 — 身份与访问控制平面：本地登录 + 知识库级 ACL
+
+- 类型：新增功能
+- 目的：在此之前系统完全匿名开放——任何人都能列库、删库、问任何库，知识库级越权读
+  （尤其是会话 ID 只校验存在、不校验归属）在实际使用中是真实漏洞。企业场景里
+  「谁能看哪个库」是刚需，而且它会改数据模型与检索链路，必须早期做（见
+  `docs/DEVELOPMENT_PLAN.md` ADR）；拖到后面做，前面所有接口都要返工。
+- 方案：
+  - 认证：`users` 表 + **argon2id** 口令哈希（`argon2-cffi`，自带随机盐）；`POST /api/auth/login`
+    换 **HS256 JWT**（载荷只有 `sub`/`iat`/`exp`，**不装权限快照**，所以改权限立即生效）；
+    `GET /api/auth/me` 供前端刷新恢复；账号由 `scripts/create_user.py` 发放，**不做注册接口**。
+  - 身份注入：`core/context.py` 的 ContextVar + 纯 ASGI 中间件把 `user_id` 注入请求上下文，
+    日志格式统一带 `user=`；middleware 用纯 ASGI 是为了能整体包在 CORS 外层。
+  - 授权：`knowledge_bases.owner_id`（NOT NULL + FK RESTRICT + 索引，迁移 `0002` 回填历史库到
+    一个不可登录的 bootstrap 账号）+ `kb_members`；三级 `read` / `write` / `owner`，策略写在
+    `core/access.py`、HTTP 映射集中在 `api/deps.py`（core 不抛 HTTPException，策略可被脚本复用）。
+  - 边界：所有涉及 kb 的路由先过 `ensure_kb_access`（**判定在服务层之前**，不做「检索后再过滤」）；
+    未登录 / 过期 / 篡改 / 停用 → 401，越权 → 403，不存在或属于别的库 → 404；
+    `/api/system/health` 与登录是唯一免鉴权白名单。
+  - 加固：`DEBUG=false` 时用默认或 <32 字节签名密钥**拒绝启动**；`ENABLE_DOCS=false` 时
+    不暴露 `/docs` `/redoc` `/openapi.json`；登录失败文案统一，不泄露账号是否存在。
+  - 前端：登录页 + 默认私有的路由守卫 + 按 `my_permission` 渲染；SSE 走原生 fetch，
+    补上 Bearer 头与 401/403/404 映射（不在 axios 拦截器作用域内，不补就是匿名请求）。
+  - 明确不做：多租户、部门隔离、文档级权限、SSO/LDAP、审计、注册接口、logout 接口。
+- 效果：
+  - `tests/test_auth.py` 覆盖越权与放行两侧：11 条受保护路由未登录全 401、跨库全 403、
+    `/health` 免鉴权且 200、伪造 Token 五类（过期 / 错密钥 / 篡改载荷 / alg=none / 缺 exp）、
+    停用账号后已签发 Token 立即失效、哈希加盐与 `"!"` 哨兵、弱密钥拒绝启动、列表隔离、
+    跨库会话 ID 回归（先红后绿）、只读 / 可写成员行为、成员管理仅 owner。
+  - `uv run pytest -q` → **128 passed, 5 deselected**（Phase 2.1 为 89）；
+    `./scripts/gates.sh g1` 全绿（ruff / mypy 42 文件 / pytest / Alembic upgrade→check→downgrade→upgrade /
+    临时端口冒烟 + `/health` + `/openapi.json` / changelog 与密钥自检）。
+  - 本机开发库已迁移并建号：`admin`/`admin` 与 `p1`/`123456` 均可登录取 token 并访问 `/api/kb`（200），
+    匿名访问同接口 401、口令错误 401「用户名或密码错误」。
+  - 已知未验证：前端构建（本机无 Node/npm），仅做静态检查与契约人工核对；已记入风险登记簿。
+- 涉及提交：d91077a（模型与 0002 迁移）、7ff082f（口令哈希 / JWT / 身份上下文 / 配置）、
+  10b3c7b（ACL 判定与鉴权依赖）、372e9fc（登录接口 + 路由接入 ACL + 跨库会话修复）、
+  a1603e9（建号脚本）、3ce0415（前端登录与按权限渲染）、4a2f2f7（鉴权 / ACL 用例）、
+  ccc701e（架构与计划文档同步 + README 精简）
+
+---
+
+## [Phase 3] 2026-09-28 — README 精简：删掉互相复述的内容，保留可执行路径
+
+- 类型：文档
+- 目的：README 长到 541 行且大量内容互相复述（「设计目标」与「特性」重复、常见问题与配置表
+  重复解释同一件事、特性列表 11 条平铺）。结果是需要找「怎么建号 / 怎么切 provider」的人
+  反而扫不到重点，而文档越长越容易与代码脱节。
+- 方案：按「同一件事只说一次、能指向单一出处就指向它」删：删掉「设计目标」（已在开头与特性里）；
+  特性 11 条合并为 6 条（文档与检索 / 流式问答与会话 / 身份与访问控制 / 模型可插拔 /
+  性能与成本 / 可观测与工程化）；常见问题 15 条删到 7 条（保留 degraded、入库 failed、
+  空召回、换 embedding 后乱、401、403、账号相关）；配置表 24 行压到 14 行，其余项指向 `.env.example`
+  （那里有逐项注释）；前置条件与基准测试段落去冗。
+- 效果：541 → 499 行，且 AGENTS.md §1.2 要求同步的内容（配置表、API 一览、认证与 ACL 说明、
+  目录结构、建号与 provider 步骤）全部保留。验证：逐条对照 §1.2 清单人工核对；
+  grep 确认无指向已删章节的交叉引用。
+- 涉及提交：ccc701e
+
+---
+
 ## [Phase 2.2] 2026-09-28 — 修复：fixtures 自检不再落盘（G0 不再脏化工作区）
 
 - 类型：修复
