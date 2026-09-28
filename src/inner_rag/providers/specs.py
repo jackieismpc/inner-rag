@@ -143,7 +143,7 @@ def _build(kind: str, name: str) -> ProviderSpec:
             label="Mock（离线假模型）",
             kind=kind,
             model=settings.MOCK_CHAT_MODEL,
-            docs_url="docs/roadmap.md",
+            docs_url="docs/DEVELOPMENT_PLAN.md",
             notes="不联网、不需要密钥，用于本地演示、CI 与降级验收",
         )
 
@@ -189,7 +189,7 @@ def _build(kind: str, name: str) -> ProviderSpec:
         label="Mock（离线确定性 embedding）",
         kind=kind,
         model=f"{settings.MOCK_EMBEDDING_MODEL}-{settings.MOCK_EMBEDDING_DIM}d",
-        docs_url="docs/roadmap.md",
+        docs_url="docs/DEVELOPMENT_PLAN.md",
         notes="哈希词袋向量，不联网；仅供演示与测试，不具备真实语义检索能力",
     )
 

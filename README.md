@@ -1,6 +1,6 @@
 # inner-rag
 
-> 多 Provider、可插拔、好部署的企业内部知识库问答系统 —— FastAPI + LangChain 1.x + ChromaDB + SQLite / PostgreSQL
+> 多 Provider、可插拔、好部署的企业内部知识库问答系统 —— FastAPI + LangChain 1.x + zvec + SQLite / PostgreSQL
 
 `inner-rag` 把企业里散落的文档（PDF / Word / Excel / 纯文本，扫描件与图片走 OCR）解析、分块、向量化
 入库，再基于「向量检索 + 引用溯源 + 流式问答」回答问题。Chat 模型与 Embedding 模型是两个**互相独立的
@@ -19,13 +19,15 @@
 3. **好部署**：`uv sync` + 一次 `alembic upgrade head` 就能跑起来；开发默认 SQLite 单文件、零外部依赖，
    部署时只改 `DATABASE_URL` 即可切到 PostgreSQL，另附 Dockerfile 与 docker compose。
 4. **工程化可用**：Alembic 迁移、CORS 白名单、文件名与导入路径校验、密钥只从 `.env` 读取、
-   检索质量可观测（真实相关度、缓存命中率、空召回率、平均延迟）、74 个离线用例 + 可选的真实 API 联网验收。
+  检索质量可观测（真实相关度、缓存命中率、空召回率、平均延迟）、89 个离线用例 + 可选的真实 API 联网验收、
+  `benchmark/` 指标脚本与 README 基准表。
 
 ## 特性
 
 - **多格式文档解析**：PDF（逐页）、Word（docx / doc）、Excel（xlsx / xls）、文本类
   （txt / md / csv / json / xml / html）；图片与扫描页走可插拔 OCR 后端
-- **向量化与检索**：ChromaDB 持久化，每个知识库一个独立 collection，统一 cosine 空间
+- **向量化与检索**：zvec（Alibaba 开源的嵌入式向量库，本项目向量库选型）持久化，每个知识库一个独立
+  collection，统一 cosine 空间；迁移期仍保留 ChromaDB 实现（见「技术栈」下的向量库选型说明）
 - **多策略检索**：`similarity`（余弦相似度）/ `mmr`（多样性去重）/ `hybrid`（两者融合），
   返回**真实**相关性分数（1 - 余弦距离），MMR 召回项如实标注为「无分数」而不是伪造 1.0
 - **流式问答**：SSE 逐 token 推送，先推引用来源再推答案，前端实时渲染并展示相关度
@@ -37,7 +39,7 @@
   按知识库精确失效）、批量嵌入 + 信号量限流、模型实例在工厂内复用
 - **可观测性**：检索日志、Prompt 日志、缓存命中率 / 空召回率 / 平均延迟统计
 - **工程化**：uv 锁依赖、Alembic 迁移、CORS 白名单、文件名与导入路径安全校验、
-  ruff + mypy 检查、74 个离线 pytest 用例（另有可选的真实 API 联网验收）、Dockerfile + docker compose
+  ruff + mypy 检查、89 个离线 pytest 用例（另有可选的真实 API 联网验收）、Dockerfile + docker compose
 
 ## 架构
 
@@ -57,7 +59,7 @@ flowchart LR
     DS --> VS["Vector Store Service"]
     RAG --> VS
     VS --> CACHE["QueryCache / EmbeddingCache"]
-    VS --> CHROMA[("ChromaDB")]
+    VS --> ZVEC[("zvec（Alibaba 开源）")]
     VS --> EMB["Embedding Provider<br/>（providers 工厂）"]
     RAG --> LLM["LLM Provider<br/>（providers 工厂）"]
     KB --> DB[("SQLite（开发默认）<br/>PostgreSQL（部署）")]
@@ -79,11 +81,16 @@ flowchart LR
 | 语言 / 包管理 | Python 3.13（uv 管理）、`uv.lock` 锁定依赖 |
 | Web 框架 | FastAPI 0.141+、Uvicorn 0.54+、SSE 流式响应 |
 | LLM 编排 | LangChain 1.x（`langchain-core` 1.6+、`langchain-text-splitters`）+ `langchain-ollama`（本地）/ `langchain-openai`（OpenAI 兼容云端）/ `langchain-deepseek`（DeepSeek 官方集成） |
-| 向量库 | ChromaDB 1.5+（persistent client）/ `langchain-chroma` |
+| 向量库 | **zvec**（Alibaba 开源、嵌入式、HNSW + cosine，本项目选型）；当前代码仍为 ChromaDB 1.5+（persistent client）/ `langchain-chroma`，按 Phase 5 迁移 |
 | 关系库 | SQLite（开发默认）+ PostgreSQL 16（部署可选）+ SQLAlchemy 2.1 + Alembic 1.20 |
 | 文档解析 | pypdf、PyMuPDF、python-docx、docx2txt、openpyxl、xlrd、Pillow、chardet |
 | 前端 | Vue 3 + Vite + Pinia + Tailwind CSS 3 |
 | 质量 | ruff、pytest（+ pytest-asyncio）、mypy |
+
+> **向量库选型**：本项目明确选用 **zvec**（[Alibaba 开源](https://github.com/alibaba/zvec)的嵌入式向量库，
+> Apache-2.0，定位「向量库里的 SQLite」：进程内嵌入、无需独立服务、HNSW + cosine、WAL 持久化、支持多进程并发读），
+> 理由是「零运维」，与 SQLite 单文件开发模型一致。当前代码落盘用的仍是 ChromaDB，两者受同一个 `VectorStore`
+> 契约约束（见 `docs/architecture.md` 3.2），迁移步骤与验收标准见 `docs/DEVELOPMENT_PLAN.md`（Phase 5）。
 
 ## 快速开始
 
@@ -280,7 +287,8 @@ inner-rag/
 │   └── services/             # parser、ocr、embedding、vector_store、rag、cache、retrieval_log
 ├── scripts/                  # 运维与排查脚本 + start.sh
 ├── tests/                    # 离线 pytest 用例 + 可选的真实 API 联网验收（-m live）
-├── docs/                     # 执行路线、测试门禁与阶段记录
+├── benchmark/                # 基准脚本：指标、评测集运行、结果落盘、README 基准表维护
+├── docs/                     # 开发计划、架构契约、评测与测试策略、龙族评测集、阶段记录
 ├── frontend/                 # Vue 3 + Vite 前端
 ├── docker-compose.yml        # 部署用：PostgreSQL 16（默认）/ 后端容器（profile=app）
 ├── Dockerfile
@@ -336,6 +344,7 @@ uv run pytest                  # 全量测试（离线；live 用例默认 desel
 uv run pytest -m live -q       # 真实 provider 联网验收（需 OPENROUTER_API_KEY / DEEPSEEK_API_KEY，会产生少量费用）
 uv run pytest -q tests/test_api.py::test_chat_stream_events_and_persistence
 uv run mypy                    # 类型检查（配置见 pyproject.toml 的 [tool.mypy]）
+uv run python -m benchmark.run_bench --mode fixtures   # 基准脚本离线自检（评测集校验 + 指标算法）
 ```
 
 测试说明：`tests/conftest.py` 在导入应用之前就把环境切到临时 SQLite、临时目录与固定的 `mock`
@@ -352,9 +361,39 @@ uv run alembic check                                 # 校验模型与迁移是�
 uv run alembic downgrade -1                           # 回退一步
 ```
 
+## 基准测试（Benchmark）
+
+改检索、改分块、改 Prompt 之后必须能回答一个问题：**到底变好了没有**。`benchmark/` 下的脚本把评测集
+（`docs/datasets/dragon_king/eval_v1.jsonl`，9 题含 1 条负样本）跑一遍，输出 RAG 指标与延迟，
+并把结果写成下面这段表格的一行；指标定义、门禁阈值与判读方式见 `docs/evaluation.md`。
+
+```bash
+# 离线自检：mock provider + 短片段 fixture，不联网、不花钱（提交前跑这个）
+uv run python -m benchmark.run_bench --mode fixtures
+
+# 真实知识库：检索指标 + 延迟，写入 README 基准表
+uv run python -m benchmark.run_bench --mode kb --kb-id 3 --update-readme
+
+# 再加回答指标（要点命中率 / 引用精度 / 拒答正确率，会调用 LLM 产生费用）
+uv run python -m benchmark.run_bench --mode kb --kb-id 3 --answer --update-readme
+```
+
+- `fixtures` 模式只验证脚本与指标算法（mock embedding 没有语义能力），**拒绝写表**，避免把自检数字当成成绩；
+- `kb` 模式用真实知识库，并绕过 QueryCache 直接查向量库，召回与延迟都是真值；`--answer` 按题计费；
+- 同一「日期 + 配置」的行会被覆盖，不同配置各占一行，改动前后一对比就知道优化有没有效果。
+
+<!-- BEGIN BENCHMARK -->
+| 日期 | 配置 | 题数 | Recall@k | MRR | 页命中率 | 要点命中率 | 引用精度 | 拒答正确率 | 检索 p50 | 检索 p95 | 端到端 p50 | 结果文件 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+<!-- END BENCHMARK -->
+
+表格内容由 `--update-readme` 写入，**不要手工编辑这两个标记之间的区域**（会被下一次运行覆盖）；
+每次运行还会在 `benchmark/results/` 留一份完整 JSON（含逐题明细与配置快照），便于回溯。
+参数、指标口径与注意事项见 `benchmark/README.md`。
+
 ## 部署
 
-开发阶段用 SQLite + 云端 API 就能跑通全链路（见 `docs/roadmap.md` 的 Phase 5 收尾计划）。
+开发阶段用 SQLite + 云端 API 就能跑通全链路（见 `docs/DEVELOPMENT_PLAN.md` 的 Phase 8）。
 
 只跑数据库（后端仍跑在宿主机上，改代码无需重建镜像）：
 
@@ -425,7 +464,7 @@ A：连接建立时已开启 WAL 与 `busy_timeout`；若仍偶发，把 `.env` 
 
 **Q：什么时候需要切 PostgreSQL？**
 A：多进程/多实例部署、并发写入较多、或需要主从备份时。改 `DATABASE_URL` 后重跑
-`uv run alembic upgrade head` 即可，两者共用同一套迁移（`docs/roadmap.md` Phase 5）。
+`uv run alembic upgrade head` 即可，两者共用同一套迁移（见 `docs/DEVELOPMENT_PLAN.md` 的 Phase 8）。
 
 **Q：API key 放哪里？**
 A：只放 `.env`（已被 `.gitignore` 忽略），`.env.example` 里只留空占位。密钥一旦泄漏，
@@ -435,10 +474,12 @@ A：只放 `.env`（已被 `.gitignore` 忽略），`.env.example` 里只留空�
 
 - **已完成**：多 Provider 抽象层（Chat / Embedding 独立选型、OpenRouter / DeepSeek 官方集成、`mock`
   降级路径、`/api/system/providers`）、SQLite 优先与密钥外置、Alembic 迁移、Docker 资产
-- **下一步**：OCR 迁移到视觉大模型（扫描件与图片型 PDF）
-- **之后**：检索质量评测集与 Rerank、任务队列与结构化日志、CI 与 PostgreSQL 部署验证
+- **进行中**：开发文档体系（`docs/DEVELOPMENT_PLAN.md` 及其子文档）、龙族真实评测集与 `benchmark/` 指标脚本
+- **Phase 3–8**：可观测性（LangSmith 追踪 + 运行日志与指标）→ 评测体系与准确性基线 → 可插拔深化
+  （provider 注册表、向量库迁移到 zvec、关系库 / 缓存 / 队列抽象）→ 用评测集驱动检索与回答质量提升 →
+  OCR / VLM 文档面扩展 → 交付（Docker / PostgreSQL / CI）
 
-每一阶段的交付物、测试门禁（G0/G1/G2）与进度记录见 `docs/roadmap.md`。
+每个阶段的交付物、完成定义、测试门禁（G0–G3）与里程碑见 `docs/DEVELOPMENT_PLAN.md`。
 
 ## License
 
