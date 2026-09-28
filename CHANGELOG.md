@@ -24,6 +24,26 @@
 
 ---
 
+## [Phase 3] 2026-09-28 — 前端构建验证：本机补齐 Node 工具链并跑通 npm run build
+
+- 类型：优化
+- 目的：Phase 3 的前端改动（登录页 / 路由守卫 / 按权限渲染 / SSE 带 Token）当时只做了静态检查，
+  提交说明里写明「本机无 Node/npm，构建未验证」——这是本阶段唯一没有任何门禁覆盖的交付物，
+  留着就是把风险推给 CI。
+- 方案：在无 sudo 的前提下装 Node：官方 tarball（Node LTS v24.21.0 linux-x64）解到 `~/.local/node`
+  并加入 PATH，不写 `/usr/local`、不动 conda base，不想要了 `rm -rf ~/.local/node` 即可回退；
+  然后在 `frontend/` 跑 `npm install`（走本机代理，139 个包）+ `npm run build`。
+  顺手同步 `package-lock.json` 里过期的 name/version（rag-frontend@1.0.0 →
+  inner-rag-frontend@0.2.0）——这个不一致会让 `npm ci` 直接失败。
+- 效果：`npm run build` 成功，**94 modules transformed**，2.72s 产出 `dist/`；
+  登录页与各视图 chunk 全部生成（LoginView 2.67 kB / KbList 7.76 / KbDetail 7.87 /
+  DocList 11.28 / ChatView 51.02 / index 153.10 kB，gzip 后 59.86 kB）。
+  至此 Phase 3 的 DoD 里不再有「未验证」项；Docker 镜像构建仍属未验证（无 docker socket 权限），
+  风险登记簿已同步收窄。
+- 涉及提交：c103bb8（锁文件 name/version）、本次提交（CHANGELOG 与风险登记簿）
+
+---
+
 ## [Phase 3] 2026-09-28 — 身份与访问控制平面：本地登录 + 知识库级 ACL
 
 - 类型：新增功能

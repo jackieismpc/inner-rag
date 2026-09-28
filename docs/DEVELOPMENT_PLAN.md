@@ -430,7 +430,7 @@ README 基准表对比：
 | 抽象层改造成回归 | 功能退化 | 每个插件点先补契约测试再抽接口；G1/G3 双门禁；小步提交 |
 | 向量库从 Chroma 迁到 zvec | 存量知识库需重建；行为差异可能改变召回 | 先补 `VectorStore` 契约测试再实现 zvec adapter；迁移用「重跑建库 + 小库指标对比」，不回归才切默认；Chroma 实现保留一个版本可回退 |
 | zvec 上游仍在快速迭代 | SDK/接口变更 | 依赖走可选 extra 并锁版本；适配器只实现在 `VectorStore` 内部，接口层不泄漏 zvec 类型 |
-| 本机无 Node/npm、无 docker socket 权限 | 前端构建与镜像无法本地验证 | 前端改动限制在最小范围；镜像验证交给 CI 或具备权限的机器，README 写明 |
+| 本机原先无 Node/npm、无 docker socket 权限 | 前端构建与镜像无法本地验证 | 已用官方 tarball 把 Node LTS 装到 `~/.local/node`（无需 sudo，不动 conda base），`npm install && npm run build` 已实测通过；docker 镜像构建仍只能交给 CI 或具备权限的机器 |
 | SQLite 并发写入 | `database is locked` | 已开 WAL + `busy_timeout`；上传并发受限；需要并发就切 PostgreSQL（Phase 10 实测） |
 | 权限改造范围蔓延 | 拖慢主线、复杂度上升 | Phase 3 明确只做「单租户 + 本地登录 + 知识库级 ACL」，多租户 / SSO / 审计不做 |
 | 迁移漂移 | 部署时炸 | G1 固定跑 `alembic check`；任何 schema 变更必须带 revision |
