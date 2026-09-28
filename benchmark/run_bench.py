@@ -19,7 +19,8 @@ uv run python -m benchmark.run_bench --mode kb --kb-id 3 --strategy hybrid --thr
 说明：
 
 * **fixtures 模式**测的是「脚本与指标算得对不对」，mock embedding 只有词面相似度，
-  分数没有质量含义，因此**不允许**写回 README（避免把自检数字当成绩）。
+  分数没有质量含义，因此**既不写回 README、也不落盘结果**——避免把自检数字当成绩，
+  也避免产生随时间漂移的噪声文件（延迟每次都不一样）。
 * **kb 模式**不经过 QueryCache 直接调向量库，保证延迟与召回是真实值；
   `--answer` 会额外调用 LLM，按题计费。
 """
@@ -249,8 +250,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         "config": _config_snapshot(args),
         "summary": metrics.summarize(results),
         "items": results,
+        "result_file": None,
     }
-    report.save_result(record, args.out_dir)
+    # 只有 kb 模式落盘：fixtures 是「脚本与指标算法」的自检，分数无质量含义，
+    # 落盘的 JSON 只会带上每次不同的延迟噪声（历史版本甚至把它提交进了仓库）。
+    if args.mode == "kb":
+        report.save_result(record, args.out_dir)
     return record
 
 
@@ -270,13 +275,18 @@ def main(argv: list[str] | None = None) -> int:
 
     print(report.console_table(record))
     summary = record["summary"]
+    result_line = (
+        f"结果已写入 {record['result_file']}"
+        if record["result_file"]
+        else "自检模式不落盘（fixtures 仅验证脚本与指标算法）"
+    )
     print(
         f"\n配置：{record['label']}\n"
         f"题目：{summary['items']}（正样本 {summary['positives']} / 负样本 {summary['negatives']}）\n"
         f"Recall@{args.k}={summary['recall_at_k']:.1%}  MRR={summary['mrr']:.3f}  "
         f"页命中率={summary['page_hit_rate']:.1%}\n"
         f"检索 p50={summary['retrieval_p50_ms']:.1f}ms  p95={summary['retrieval_p95_ms']:.1f}ms\n"
-        f"结果已写入 {record['result_file']}"
+        f"{result_line}"
     )
     if args.mode == "fixtures":
         print("注意：fixtures 模式用 mock embedding，指标仅用于验证脚本，不代表检索质量。")

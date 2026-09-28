@@ -312,7 +312,7 @@ CI 在 PR 上全绿。
 uv run ruff check .
 uv run ruff format --check .
 
-# 基准脚本自检：评测集/fixture 一致性与指标算法（离线，不写 README）
+# 基准脚本自检：评测集/fixture 一致性与指标算法（离线，不写 README、不落盘）
 uv run python -m benchmark.run_bench --mode fixtures
 ```
 

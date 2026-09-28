@@ -225,7 +225,7 @@ L3 不只看自动指标：抽 10 题人工核对引用页码是否真的能翻�
 | 检索指标（Recall@k / MRR / 页命中率） | `benchmark/metrics.py`，逐题结果里的 `hit` / `rr` / `page_hit` |
 | 回答指标（要点命中率 / 引用精度 / 拒答正确率） | `benchmark/metrics.py`，由 `--answer` 填充 |
 | 评测集与 fixture 的 schema / 锚点校验 | `benchmark/dataset.py` |
-| 报告（配置快照 + 逐题明细） | `benchmark/results/<日期>-<模式>-<配置>.json` |
+| 报告（配置快照 + 逐题明细） | `benchmark/results/<日期>-kb-<配置>.json`（fixtures 自检不落盘） |
 | README 基准表 | `benchmark/report.py`，写入 `<!-- BEGIN BENCHMARK -->` 区间 |
 
 三者是同一份数据的不同展示：
@@ -235,7 +235,7 @@ L3 不只看自动指标：抽 10 题人工核对引用页码是否真的能翻�
 3. 里程碑节点把关键数字摘进第 6.2 节的基线表（长期档案，永不删旧行）。
 
 留给 Phase 6 的部分：LLM-as-judge 正确性与忠实度、token/成本字段、`docs/reports/*.md` 报告、LangSmith
-experiment 回写。`benchmark` 的 fixtures 模式**不允许**写 README——自检分数不是成绩。
+experiment 回写。`benchmark` 的 fixtures 模式**不允许**写 README、也不落盘结果——自检分数不是成绩。
 
 ## 7. 门禁（G3）
 

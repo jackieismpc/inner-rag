@@ -82,7 +82,7 @@ tests/
   跑通（用 `docs/datasets/dragon_king/fixtures/`），全程 mock provider；
 - 评测代码本身要有单测（指标算得对、schema 校验能拦住坏数据）：`tests/test_benchmark_metrics.py`；
 - 涉及检索 / 分块 / Prompt 的改动，还要跑一次 `--mode kb` 并把结果写进 README 基准表（`--update-readme`）；
-- 报告落 `benchmark/results/*.json`（每次运行都有）与 `docs/reports/`（Phase 6 起），
+- 报告落 `benchmark/results/*.json`（kb 模式每次运行都有；fixtures 自检不落盘）与 `docs/reports/`（Phase 6 起），
   里程碑数字更新 `docs/evaluation.md` 的基线表。
 
 ## 6. 门禁与命令速查
@@ -90,7 +90,7 @@ tests/
 ```bash
 # 每次提交（G0）
 uv run ruff check . && uv run ruff format --check .
-uv run python -m benchmark.run_bench --mode fixtures   # 评测自检（离线，不写 README）
+uv run python -m benchmark.run_bench --mode fixtures   # 评测自检（离线，不写 README、不落盘）
 
 # 阶段收尾（G1）
 uv run mypy

@@ -14,15 +14,15 @@
 | `metrics.py` | 指标纯函数（不依赖 `inner_rag`，可单独单测） |
 | `dataset.py` | 评测集 / fixture 读取与校验（schema + 引用锚点） |
 | `report.py` | 结果落盘 `results/*.json` 与 README 表格维护 |
-| `results/` | 每次运行一份 JSON（同一「日期 + 配置」在 README 里覆盖为一行） |
+| `results/` | kb 模式每次运行一份 JSON（同一「日期 + 配置」在 README 里覆盖为一行）；fixtures 自检不落盘 |
 
 单测在 `tests/test_benchmark_metrics.py`（离线；本地有 PDF 时还会校验评测集锚点）。
 
 ## 两种模式
 
-| 模式 | 数据 | 网络 | 指标含义 | 能否写 README |
+| 模式 | 数据 | 网络 | 指标含义 | 写 README / 落盘 |
 | --- | --- | --- | --- | --- |
-| `fixtures` | 仓库内 10 段短 fixture + mock embedding | 否 | 只验证**脚本与指标算得对** | **否**（拒绝写入，避免把自检当成绩） |
+| `fixtures` | 仓库内 10 段短 fixture + mock embedding | 否 | 只验证**脚本与指标算得对** | **都不**（自检不是成绩，也不落盘噪声文件） |
 | `kb` | 本地 PDF 建好的真实知识库 | 需要 provider Key | 真实召回/引用/延迟（加 `--answer` 还有回答指标） | 是 |
 
 ## 常用命令
@@ -60,7 +60,8 @@ uv run python -m benchmark.run_bench --mode kb --kb-id 3 --strategy hybrid --thr
 
 ## 注意事项
 
-- **fixtures 模式不是成绩**：mock embedding 只有词面相似度，分数没有质量含义，脚本会拒绝写 README。
+- **fixtures 模式不是成绩**：mock embedding 只有词面相似度，分数没有质量含义，脚本会拒绝写 README，
+  也不落盘结果文件（延迟每次不同，落盘只会污染工作区）。
 - **kb 模式绕过 QueryCache**：直接调向量库，保证延迟与召回是真实值（否则第二次查询会假性变快）。
 - **必须与建库时的 embedding 一致**：`kb.embedding_model` 与当前配置不一致时脚本直接报错并提示重建索引；
   换 embedding / 改 `CHUNK_SIZE` 后，指标不可与旧行直接比较。

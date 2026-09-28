@@ -380,7 +380,7 @@ uv run python -m benchmark.run_bench --mode kb --kb-id 3 --update-readme
 uv run python -m benchmark.run_bench --mode kb --kb-id 3 --answer --update-readme
 ```
 
-- `fixtures` 模式只验证脚本与指标算法（mock embedding 没有语义能力），**拒绝写表**，避免把自检数字当成成绩；
+- `fixtures` 模式只验证脚本与指标算法（mock embedding 没有语义能力），**不写表也不落盘**，避免把自检数字当成成绩、也避免留下随时间漂移的噪声文件；
 - `kb` 模式用真实知识库，并绕过 QueryCache 直接查向量库，召回与延迟都是真值；`--answer` 按题计费；
 - 同一「日期 + 配置」的行会被覆盖，不同配置各占一行，改动前后一对比就知道优化有没有效果。
 
@@ -390,7 +390,8 @@ uv run python -m benchmark.run_bench --mode kb --kb-id 3 --answer --update-readm
 <!-- END BENCHMARK -->
 
 表格内容由 `--update-readme` 写入，**不要手工编辑这两个标记之间的区域**（会被下一次运行覆盖）；
-每次运行还会在 `benchmark/results/` 留一份完整 JSON（含逐题明细与配置快照），便于回溯。
+kb 模式每次运行还会在 `benchmark/results/` 留一份完整 JSON（含逐题明细与配置快照），便于回溯
+（fixtures 自检不落盘）。
 参数、指标口径与注意事项见 `benchmark/README.md`。
 
 ## 部署

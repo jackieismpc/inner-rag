@@ -24,6 +24,22 @@
 
 ---
 
+## [Phase 2.2] 2026-09-28 — 修复：fixtures 自检不再落盘（G0 不再脏化工作区）
+
+- 类型：修复
+- 目的：`scripts/gates.sh g0` 一加进来就暴露了旧行为：`--mode fixtures` 会把结果写到
+  `benchmark/results/`，且这个文件**已被提交进仓库**。后果是每次跑门禁都会把工作区弄脏
+  （`git status` 出现修改），而里面只有 mock 分数与每次不同的延迟——既不是成绩，也不是证据。
+- 方案：与「fixtures 拒绝写 README」保持同一口径——**fixtures 模式不再落盘**，只打印终端结果；
+  只有 `--mode kb` 才写 `benchmark/results/*.json`；同时删除那个被跟踪的自检 JSON（`results/` 只留 `.gitkeep`）；
+  同步更新 `benchmark/README.md`、`docs/evaluation.md`、`docs/testing.md`、`docs/DEVELOPMENT_PLAN.md`、README。
+- 效果：`uv run python -m benchmark.run_bench --mode fixtures` 运行后 `git status --porcelain` 无新增/修改
+  的 results 文件；`benchmark/results/` 只剩 `.gitkeep`。验证命令：
+  `uv run python -m benchmark.run_bench --mode fixtures && git status --porcelain`。
+- 涉及提交：待提交（本次改动）
+
+---
+
 ## [Phase 2.2] 2026-09-28 — 新增 scripts/gates.sh，把 G0/G1/G2 变成可执行门禁
 
 - 类型：新增功能
