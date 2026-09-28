@@ -1,0 +1,39 @@
+# === Python / uv ===
+__pycache__/
+*.py[cod]
+*.pyo
+*.so
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# === Environment / secrets ===
+.env
+.env.*
+!.env.example
+
+# === Local data (generated at runtime) ===
+data/
+uploads/
+chroma_db/
+logs/
+*.log
+
+# === Node ===
+node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+
+# === IDE / OS ===
+.idea/
+.vscode/
+*.swp
+.DS_Store
