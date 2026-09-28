@@ -6,7 +6,7 @@ import enum
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -31,6 +31,11 @@ class KnowledgeBase(Base):
     __tablename__ = "knowledge_bases"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    # ondelete=RESTRICT：用户还拥有知识库时不允许删除该用户（数据库显性报错），
+    # 而不是静默级联删库——数据丢失是运维事故，停用账号才是正常操作。
+    owner_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     name: Mapped[str] = mapped_column(String(200), nullable=False, comment="知识库名称")
     description: Mapped[str | None] = mapped_column(Text, comment="知识库描述")
     icon: Mapped[str] = mapped_column(String(16), default="📚", comment="图标 emoji")

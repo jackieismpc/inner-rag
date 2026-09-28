@@ -79,7 +79,13 @@ def init_db() -> None:
     生产/开发默认由 Alembic 负责建表（AUTO_CREATE_TABLES=false），
     缺少表时直接报错并给出修复命令，而不是静默地建出一份可能与迁移脚本不一致的结构。
     """
-    from inner_rag.models import conversation, document, knowledge_base  # noqa: F401
+    from inner_rag.models import (  # noqa: F401
+        conversation,
+        document,
+        kb_member,
+        knowledge_base,
+        user,
+    )
 
     if settings.AUTO_CREATE_TABLES:
         Base.metadata.create_all(bind=engine)
