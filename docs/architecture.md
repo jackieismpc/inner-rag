@@ -27,9 +27,9 @@ src/inner_rag/
 │   ├── chat.py        #   Chat 实例构造（每 provider 一个分支）
 │   ├── embeddings.py  #   Embedding 实例构造
 │   └── factory.py     #   对外门面：get_chat_model / get_embeddings / chat_health
-├── models/            # SQLAlchemy ORM（knowledge_base / document / conversation）
+├── models/            # SQLAlchemy ORM（knowledge_base / document / conversation / user / kb_acl）
 ├── schemas/           # Pydantic 出入参
-└── core/              # config（唯一配置入口）、database（会话/引擎）
+└── core/              # config（唯一配置入口）、database（会话/引擎）、security（鉴权与 ACL，Phase 3）
 ```
 
 依赖方向**只能向下**：
@@ -53,13 +53,14 @@ api  →  services  →  providers / core
 | --- | --- | --- | --- | --- | --- |
 | Chat 模型 | `providers/factory.py::get_chat_model` | ollama / openrouter / deepseek / openai / mock | `LLM_PROVIDER`、`*_CHAT_MODEL`、`*_API_KEY`、`LLM_REASONING_EFFORT` | `chat_health()` → `/api/system/health` | `tests/test_providers.py` |
 | Embedding 模型 | `providers/factory.py::get_embeddings` | ollama / openrouter / openai / mock | `EMBEDDING_PROVIDER`、`*_EMBEDDING_MODEL`、`EMBEDDING_MAX_INPUT_CHARS` | `providers_catalog()` → `/api/system/providers` | `tests/test_providers.py` |
-| 向量库 | `services/vector_store.py::VectorStoreService`（Phase 5 抽出 `VectorStore`） | **zvec**（Alibaba 开源嵌入式向量库，目标实现，Phase 5 迁移）；当前实现为 ChromaDB（cosine，每库一 collection） | `CHROMA_PERSIST_DIR`（当前）/ `ZVEC_PATH`（Phase 5）、`CHUNK_SIZE`、`CHUNK_OVERLAP` | 建库时 `get_store()` 探活 | `tests/test_vector_store.py` |
+| 向量库 | `services/vector_store.py::VectorStoreService`（Phase 4 抽出 `VectorStore`） | **zvec**（Alibaba 开源嵌入式向量库，目标实现，Phase 4 迁移）；当前实现为 ChromaDB（cosine，每库一 collection） | `CHROMA_PERSIST_DIR`（当前）/ `ZVEC_PATH`（Phase 4）、`CHUNK_SIZE`、`CHUNK_OVERLAP` | 建库时 `get_store()` 探活 | `tests/test_vector_store.py` |
 | 关系库 | `core/database.py` + Alembic | SQLite（默认）/ PostgreSQL | `DATABASE_URL` | `lifespan` 里 `check_database()` | `tests/test_api.py` |
 | 缓存 | `services/cache.py` | 进程内 LRU（query + embedding 两套） | `CACHE_*`、`EMBEDDING_CACHE_SIZE` | 无（进程内） | `tests/test_cache.py` |
 | 后台任务 | FastAPI `BackgroundTasks` | 进程内 | — | 文档状态机可观测 | `tests/test_api.py` |
-| OCR | `services/ocr.py` | none（默认）/ paddle / vlm（Phase 7） | `OCR_BACKEND`、`OCR_LANG` | 启动时记录后端与可用性 | `tests/test_parser.py` |
-| 追踪 / 指标 | `core/observability.py`（Phase 3 新增） | loguru + LangSmith（+ 预留 OTLP） | `LANGSMITH_*`、`LOG_FORMAT`、`METRICS_BACKEND` | `/api/system/metrics` | Phase 3 新增 |
-| 评测器 | `services/evaluation.py`（Phase 4 新增） | 指标 + LLM-as-judge | 评测集路径、judge 模型 | 报告产出 | Phase 4 新增 |
+| OCR | `services/ocr.py` | none（默认）/ paddle / vlm（Phase 9） | `OCR_BACKEND`、`OCR_LANG` | 启动时记录后端与可用性 | `tests/test_parser.py` |
+| 追踪 / 指标 | `core/observability.py`（Phase 5 新增） | loguru + LangSmith（+ 预留 OTLP） | `LANGSMITH_*`、`LOG_FORMAT`、`METRICS_BACKEND` | `/api/system/metrics` | Phase 5 新增 |
+| 评测器 | `services/evaluation.py`（Phase 6 新增） | 指标 + LLM-as-judge | 评测集路径、judge 模型 | 报告产出 | Phase 6 新增 |
+| 身份 / 权限 | `core/security.py` + FastAPI 依赖（Phase 3 新增） | 本地账号（密码哈希）+ 会话 Token；知识库级 ACL | `AUTH_SECRET_KEY`、`AUTH_TOKEN_TTL_MINUTES`（Phase 3 定稿） | `/api/system/health` 免鉴权 | Phase 3 新增 |
 
 「五件套」标准：**接口 + 内置实现 + 配置项 + 探活 + 契约测试**。少任何一件都不算可插拔完成——
 尤其是探活与契约测试，这两件最容易漏，漏了就会在换后端时才发现问题。
@@ -78,7 +79,7 @@ api  →  services  →  providers / core
   （`VectorStoreService.ensure_embedding_matches`，不一致会抛 `EmbeddingIdentityMismatch` 并提示
   `scripts/reindex_kb.py`）。
 
-Phase 5 目标形态（把「分支」换成「注册表」）：
+Phase 7 目标形态（把「分支」换成「注册表」）：
 
 ```python
 # src/inner_rag/plugins/registry.py
@@ -102,8 +103,8 @@ def get_chat_builder(name: str) -> ChatBuilder: ...
 
 ### 3.2 向量库（`VectorStore`）
 
-**实现者**：zvec（Alibaba 开源嵌入式向量库，项目选型与目标实现，Phase 5 迁移）/ chroma（当前实现，
-迁移完成后降为兼容实现）。下面是 Phase 5 抽出的接口，语义按现有 Chroma 行为定义：
+**实现者**：zvec（Alibaba 开源嵌入式向量库，项目选型与目标实现，Phase 4 迁移）/ chroma（当前实现，
+迁移完成后降为兼容实现）。下面是 Phase 4 抽出的接口，语义按现有 Chroma 行为定义：
 
 ```python
 class VectorStore(Protocol):
@@ -131,10 +132,10 @@ class VectorStore(Protocol):
 - **MMR 无分数**：`strategy="mmr"` 的条目 `score=None`，不过阈值过滤，排序时排在有分数之后；
 - **阈值过滤计数**：被 `score_threshold` 滤掉的条数要返回，供指标统计「空召回率」；
 - **元数据是标量字符串**：`doc_id` / `kb_id` / `chunk_index` 存字符串，`page` 存数字，
-  Phase 4 起新增 `page_start` / `page_end`；
+  Phase 6 起新增 `page_start` / `page_end`；
 - **写入幂等性边界**：同一文档重新向量化前必须先 `delete_document`，避免重复分块累积。
 
-zvec 适配器（Phase 5）要把上面这些语义映射到 zvec SDK，并逐条写进契约测试：
+zvec 适配器（Phase 4）要把上面这些语义映射到 zvec SDK，并逐条写进契约测试：
 
 | 契约方法 | zvec 侧动作 | 实现要点 |
 | --- | --- | --- |
@@ -149,7 +150,7 @@ zvec 适配器（Phase 5）要把上面这些语义映射到 zvec SDK，并逐�
 ### 3.3 关系库与 Repository
 
 现状：SQLAlchemy 2.x 同步 ORM + Alembic；SQLite 打开 WAL、外键与 `busy_timeout`；PostgreSQL 共用同一套
-迁移（`migrations/`）。Phase 5 引入 repository 边界：
+迁移（`migrations/`）。Phase 7 引入 repository 边界：
 
 ```python
 class KnowledgeBaseRepository(Protocol):
@@ -180,7 +181,7 @@ class CacheBackend(Protocol):
 
 - query 缓存按 `kb_id` 精确失效（文档增删改后必须让该库全部失效）；
 - embedding 缓存按 `identity`（`provider:model`）隔离，跨模型不许命中；
-- Phase 5 加 Redis 实现时，序列化必须版本化（`cache_schema_version`），避免上线后读到旧结构。
+- Phase 7 加 Redis 实现时，序列化必须版本化（`cache_schema_version`），避免上线后读到旧结构。
 
 ### 3.5 任务队列
 
@@ -201,21 +202,65 @@ class TaskQueue(Protocol):
 
 - `none`：遇到图片 / 扫描件**显式失败**并说明如何开启，不许静默丢内容；
 - `paddle`：本地推理，重依赖，按 extra 安装；
-- `vlm`（Phase 7）：走 OpenAI 兼容接口传 base64 图片，成本进 trace。
+- `vlm`（Phase 9）：走 OpenAI 兼容接口传 base64 图片，成本进 trace。
 
-### 3.7 追踪与指标（Phase 3）
+### 3.7 追踪与指标（Phase 5）
 
 `core/observability.py` 暴露 `Tracer` 门面；LangSmith 不可用时降级为本地计时日志。
 细节（trace 树、metadata 约定、日志 schema、指标）见 `docs/observability.md`。
 
-## 4. 怎么加一个新后端（分步指南）
+### 3.8 身份与访问控制（Phase 3）
+
+**目标**：把「谁在用、能看哪个知识库」变成一等公民。本期范围：**单租户 + 本地账号 + 知识库级 ACL**；
+明确不做多租户、部门隔离、文档级权限、SSO/LDAP 与审计（见 `docs/DEVELOPMENT_PLAN.md` Phase 3）。
+
+- **认证**：账号存 `users` 表，密码只存**强哈希**（不可逆，如 bcrypt/argon2）；登录成功签发会话 Token
+  （JWT 或服务端 session），Token 带 `user_id` 与过期时间，过期 / 篡改一律 401。
+- **注入方式**：`AuthMiddleware` / FastAPI 依赖解析 Token，把 `user_id` 写进 `contextvars`；
+  日志与 trace 按 `request_id` + `user_id` 串联，**不靠每个函数手动传参**。
+- **授权**：知识库级 ACL（`knowledge_bases.owner_id` + 授权用户关联表）。`/api/kb`、`/api/doc`、
+  `/api/chat` 路由先解析目标 `kb_id`，再校验当前用户可读 / 可写：未登录 → **401**，
+  已登录但无权限 → **403**；列表接口只返回有权限的库。
+- **检索边界**：权限判定发生在进入服务层**之前**，检索只在用户有权限的 kb 内发生；
+  不允许在 `services/rag.py` 里用「检索后再过滤掉不可见的 kb」来补。
+- **免鉴权白名单**：`/api/system/health` 必须免鉴权且永不 5xx（监控与探活用）；
+  `/docs` 与 `/openapi.json` 在非生产环境可放开，生产默认关闭（`ENABLE_DOCS`）。
+
+## 4. 关系库 vs 向量库：各存什么、怎么对账
+
+两个**不同职责**的存储，缺一不可，也不互相替代。
+
+| 维度 | 关系库（SQLite / PostgreSQL） | 向量库（zvec） |
+| --- | --- | --- |
+| 存什么 | 结构化事实：知识库、文档元数据与状态、会话与消息、引用来源、用户与 ACL | 分块文本 + 其**向量**，以及检索用元数据（`doc_id` / `kb_id` / `chunk_index` / `page_start` / `page_end`） |
+| 回答什么问题 | 「有哪些库、哪些文档、处理到哪一步了、谁问了什么」 | 「哪些分块的语义最接近这个问题」 |
+| 查询方式 | SQL：等值 / 范围 / 排序 / 事务（ACID） | 近似最近邻（ANN，HNSW + cosine 距离） |
+| 索引依据 | 主键 / 外键 / 普通索引 | 向量索引（HNSW 图），依赖 embedding 空间 |
+| 一致性角色 | **权威（source of truth）**：文档状态机、`kb.embedding_key`、ACL 都在这里 | **可重建的派生物**：换 embedding 或分块参数后重跑建库即可 |
+| 规模量级 | 以行为单位（开发期单文件 SQLite / 部署期 PG） | 与分块数成正比（全库 ~2,900–3,000 个分块、1024 维） |
+| 能看到什么 | 文档数、分块数、状态分布 | 只能查到向量数（`count()`），不知道业务状态 |
+
+分工与对账：
+
+1. **先写关系库，再写向量库**：上传文档先落 `documents`（状态 `pending`），解析分块后写向量，
+   成功才推进到 `completed`。状态机是「文档能不能被检索」的唯一判据。
+2. **对账口径**：向量库 `count(kb_id)` 必须等于关系库中该库 `completed` 文档的分块数之和；
+   `scripts/check_vectors.py` 与 `/api/kb/{kb_id}` 都按这个口径体检，不一致就是 bug。
+3. **重建而非修补**：向量是派生物，换了 embedding / 分块参数 / 向量库实现后，**不试图原地修改**，
+   走「新建库目录 + 重跑建库」，关系库里的业务数据不动（见 `scripts/reindex_kb.py`）。
+4. **一致性边界**：不做跨存储的分布式事务（本系统不需要）；允许「向量已写、状态未推进」的中间态，
+   但**不允许**「状态 `completed` 而向量缺失」——这由对账脚本与重试兜住。
+
+一句话：关系库存「**我们知道什么**」，向量库存「**怎么找到它**」。
+
+## 5. 怎么加一个新后端（分步指南）
 
 **示例 A：加一个 OpenAI 兼容的 chat 网关 `mygateway`**
 
 1. `core/config.py` 增 `MYGATEWAY_BASE_URL` / `MYGATEWAY_API_KEY` / `MYGATEWAY_CHAT_MODEL`；
 2. `providers/specs.py`：加进 `CHAT_PROVIDERS`，在 `_build()` 里补 `ProviderSpec`（含 `docs_url`、
    `api_key_env`、`model_list_authoritative`）；
-3. `providers/chat.py`：加一个 builder 分支（或 Phase 5 后 `registry.register_chat("mygateway", ...)`）；
+3. `providers/chat.py`：加一个 builder 分支（或 Phase 7 后 `registry.register_chat("mygateway", ...)`）；
 4. `.env.example` 补三行与注释；
 5. 测试：`tests/test_providers.py` 加「已配置 → OK / 缺 Key → 可读报错 / 模型不在列表 → warning」；
    需要时在 `tests/test_live_providers.py` 加 `-m live` 用例；
@@ -223,7 +268,7 @@ class TaskQueue(Protocol):
 
 **示例 B：加一个向量库 `pgvector`**（内置的是 zvec，见 3.2；这里演示再引入第三方）
 
-1. `services/vector_store/`（Phase 5 拆包）下新增 `pgvector.py`，实现第 3.2 节全部方法；
+1. `services/vector_store/`（Phase 4 拆包）下新增 `pgvector.py`，实现第 3.2 节全部方法；
 2. 新增配置 `VECTOR_STORE=zvec|chroma|pgvector`，并在 `factory.get_vector_store()` 里查表；
 3. 依赖进 `pyproject.toml` 的可选 extra；
 4. **跑同一套契约测试**（`tests/contracts/test_vector_store_contract.py`，参数化跑所有实现）；
@@ -231,7 +276,7 @@ class TaskQueue(Protocol):
 
 判定标准：如果为了接一个新后端你改了 `services/rag.py` 或 `api/*.py`，说明抽象漏了，先补接口再继续。
 
-## 5. 错误与降级契约
+## 6. 错误与降级契约
 
 | 场景 | 行为 | 用户看到什么 |
 | --- | --- | --- |
@@ -239,6 +284,8 @@ class TaskQueue(Protocol):
 | 知识库 embedding 与当前配置不一致 | `EmbeddingIdentityMismatch` | 409/503 + 「切回原模型或跑 `scripts/reindex_kb.py`」 |
 | provider 的 `/models` 不含当前模型但该端点不权威 | 只告警 | `/api/system/health` 的 `llm.ok=true` 且 `llm.warning` 有值 |
 | provider 的 `/models` 权威且不含当前模型 | 判为不可用 | `llm.ok=false` + 错误里列出可选模型名 |
+| 未登录 / Token 过期或篡改（Phase 3） | 401（不带内部错误细节） | 「请重新登录」；前端跳登录页 |
+| 已登录但无该知识库权限（Phase 3） | 403 | 「无权访问该知识库」；列表接口不返回无权限的库 |
 | LangSmith 未配置或不可达 | 降级为本地日志 + 计时 | 无感知，仅启动/首次请求一条 warning |
 | LLM 生成中途失败（流式已发头） | 发一个 `event: error` 帧并结束 | 前端展示错误，不静默截断 |
 
@@ -248,7 +295,7 @@ class TaskQueue(Protocol):
 2. **配置错误要在启动或首个请求暴露**，不能等用户提问才炸出一句 401；
 3. **降级路径必须有测试**：凡是「优雅降级」的分支，都要有一个离线用例证明它真的降级了。
 
-## 6. 兼容策略
+## 7. 兼容策略
 
 - **配置向后兼容**：新增配置项必须有默认值；改名要同时保留旧名并打 deprecation warning 一个版本。
 - **API 向后兼容**：`/api/*` 响应只增字段、不改含义；破坏性变更走 `/api/v2`。

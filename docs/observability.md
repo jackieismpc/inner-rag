@@ -154,7 +154,7 @@ tags：`["env:<env>", "provider:<provider>", "kind:chat|ingest|eval"]`。
 | 答「没有找到相关内容」 | `rag_retrieve_empty_total` + trace 的 `vector.search` | 阈值过高、embedding 截断（512 token 模型）、分块过粗 |
 | 引用了错误文档 | trace 的 `sources` 列表 + `filtered_out` | `TOP_K` 过大、阈值过低、混合检索权重不合理 |
 | 建库慢 / 花费高 | `ingest.document` 子 span 耗时分布 | 嵌入 batch 太小、缓存未命中、免费额度限流 |
-| 配置错误 | `/api/system/health` 的 `llm` / `embedding` 字段 | 见 `docs/architecture.md` 第 5 节的错误契约 |
+| 配置错误 | `/api/system/health` 的 `llm` / `embedding` 字段 | 见 `docs/architecture.md` 第 6 节的错误契约 |
 | trace 看不到 | 启动日志中的 tracing 状态行 | `LANGSMITH_TRACING=false`、Key 缺失、网络不通（均只告警） |
 
 排障统一入口：**拿 `request_id` 串日志 → 拿 `session_id` 找 LangSmith thread → 在 trace 里定位最慢的 span**。
