@@ -68,6 +68,8 @@ packages = ["src/inner_rag"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# tests/ 与 benchmark/ 都直接 import 第一方包（inner_rag / benchmark），根目录要进 sys.path
+pythonpath = ["."]
 asyncio_mode = "auto"
 filterwarnings = ["error::DeprecationWarning"]
 # live 用例会真实调用云端 API（花钱、需网络），默认不跑：
@@ -80,7 +82,7 @@ addopts = "-m 'not live'"
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-src = ["src", "tests"]
+src = ["src", "tests", "."]  # "." 让 tests/ 里能 import 第一方的 benchmark 包
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]

@@ -1,0 +1,10 @@
+{"fixture_id": "p5904-sakura-name", "page": 5904, "file": "p5904-sakura-name.txt", "eval_ids": ["sakura-who"], "chars": 104}
+{"fixture_id": "p6355-sakura-name", "page": 6355, "file": "p6355-sakura-name.txt", "eval_ids": ["sakura-who", "erie-call-lumingfei"], "chars": 80}
+{"fixture_id": "p123-nono-name", "page": 123, "file": "p123-nono-name.txt", "eval_ids": ["nonno-real-name"], "chars": 108}
+{"fixture_id": "p6079-sakura-job", "page": 6079, "file": "p6079-sakura-job.txt", "eval_ids": ["sakura-job"], "chars": 91}
+{"fixture_id": "p6072-sakura-job", "page": 6072, "file": "p6072-sakura-job.txt", "eval_ids": ["sakura-who", "sakura-job"], "chars": 76}
+{"fixture_id": "p331-deans-principal", "page": 331, "file": "p331-deans-principal.txt", "eval_ids": ["kasell-deans", "kasell-principal"], "chars": 190}
+{"fixture_id": "p5278-erie-lingyan", "page": 5278, "file": "p5278-erie-lingyan.txt", "eval_ids": ["erie-lingyan"], "chars": 105}
+{"fixture_id": "p6413-erie-call", "page": 6413, "file": "p6413-erie-call.txt", "eval_ids": ["erie-call-lumingfei"], "chars": 72}
+{"fixture_id": "p118-principal", "page": 118, "file": "p118-principal.txt", "eval_ids": ["kasell-principal"], "chars": 49}
+{"fixture_id": "p383-white-king", "page": 383, "file": "p383-white-king.txt", "eval_ids": ["white-king-lingyan"], "chars": 83}
