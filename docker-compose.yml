@@ -1,0 +1,53 @@
+# 本地开发最常用：只起数据库
+#   docker compose up -d postgres
+# 想连后端一起跑（含前端构建产物挂载时可自行扩展）：
+#   docker compose --profile app up -d
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: inner-rag-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: rag
+      POSTGRES_DB: rag_db
+      # 中文排序/检索更稳的默认配置
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    profiles: ["app"]
+    build: .
+    container_name: inner-rag-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # 容器内通过服务名访问数据库
+      DATABASE_URL: postgresql+psycopg://rag:rag@postgres:5432/rag_db
+      # 宿主机上的 Ollama（Linux 下 host.docker.internal 需要 extra_hosts）
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      OLLAMA_LLM_MODEL: ${OLLAMA_LLM_MODEL:-qwen3:14b}
+      OLLAMA_EMBEDDING_MODEL: ${OLLAMA_EMBEDDING_MODEL:-qwen3-embedding:8b}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000,http://127.0.0.1:3000}
+      OCR_BACKEND: ${OCR_BACKEND:-none}
+      AUTO_CREATE_TABLES: "false"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "8010:8010"
+    volumes:
+      - app_data:/data
+
+volumes:
+  pg_data:
+  app_data:
