@@ -36,7 +36,7 @@
 - 效果：`uv run python -m benchmark.run_bench --mode fixtures` 运行后 `git status --porcelain` 无新增/修改
   的 results 文件；`benchmark/results/` 只剩 `.gitkeep`。验证命令：
   `uv run python -m benchmark.run_bench --mode fixtures && git status --porcelain`。
-- 涉及提交：待提交（本次改动）
+- 涉及提交：fe65019
 
 ---
 
@@ -52,7 +52,7 @@
   - G2：`pytest -m live` 联网验收，并打印无法脚本化的手动步骤。
 - 效果：`./scripts/gates.sh g0` 已实测通过（ruff 全绿、63 文件格式正常、fixtures 自检正常输出指标）；
   脚本通过 `bash -n` 语法检查。
-- 涉及提交：待提交（本次改动）
+- 涉及提交：c93034f
 
 ---
 
@@ -68,7 +68,7 @@
   同步修正阶段编号引用（evaluation Phase 6、contracts Phase 7、tracing Phase 5、VLM Phase 9、CI Phase 10）。
 - 效果：测试策略与 `AGENTS.md` §4 一致，可直接据此判定「这个用例该不该存在」。
   验证：与 `AGENTS.md` §4、`docs/DEVELOPMENT_PLAN.md` §5 门禁逐条对照无矛盾。
-- 涉及提交：待提交（本次改动）
+- 涉及提交：9eca4ec
 
 ---
 
@@ -84,7 +84,7 @@
   插件点总表新增身份/权限行，错误契约新增 401/403 两行；同步修正全文阶段编号（Phase 4/5/6/7/9）。
 - 效果：存储分工与一致性边界有明确文档；权限实现的边界（做什么、不做什么）可直接引用。
   验证：章节编号重排后修正 `docs/observability.md` 对「第 6 节错误契约」的引用；人工核对链接有效。
-- 涉及提交：待提交（本次改动）
+- 涉及提交：7283026
 
 ---
 
@@ -102,9 +102,11 @@
   - 新增两条不变量（生产级但不做过度设计、变更留痕）与范围说明（开发期可用云端 API、不做真实企业合规）。
 - 效果：`docs/DEVELOPMENT_PLAN.md` 阶段编号与 DoD 覆盖 Phase 3–10；全仓库 `Phase N` 引用已对齐
   （`grep -rn "Phase [0-9]" docs/ README.md` 无遗漏）。验证：G0（ruff）与文档链接人工核对。
-- 涉及提交：待提交（本次改动）
+- 涉及提交：b60a9ac
 
 ---
+
+## [Phase 2.2] 2026-09-28 — 建立变更纪律（AGENTS.md）与 Changelog 制度
 
 - 类型：文档
 - 目的：随着进入 Phase 3 之后的开发，改动会越来越多；需要一个**强制机制**保证每次改动的
@@ -121,7 +123,7 @@
 - 效果：`AGENTS.md` 共 102 行，覆盖 7 条纪律（变更纪律 / 禁止无效防御 / 注释命名 / 测试 /
   禁止重构债 / 提交安全 / push 自检）；`CHANGELOG.md` 建立并回溯记录 Phase 0–2.1。
   验证：`wc -l AGENTS.md`；后续每次 push 通过 `AGENTS.md §7` 清单自检。
-- 涉及提交：待提交（本次改动）
+- 涉及提交：8d00977
 
 ---
 
