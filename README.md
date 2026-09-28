@@ -1,41 +1,25 @@
 # inner-rag
 
-> 多 Provider 的企业知识库问答系统 —— FastAPI + LangChain 1.x + ChromaDB + SQLite / PostgreSQL
+> 多 Provider、可插拔、好部署的企业内部知识库问答系统 —— FastAPI + LangChain 1.x + ChromaDB + SQLite / PostgreSQL
 
-`inner-rag` 是一个完整可跑的 RAG（检索增强生成）知识库系统：把散落的文档（PDF / Word / Excel /
-纯文本，扫描件与图片走 OCR）解析、分块、向量化入库，然后基于「向量检索 + 引用溯源 + 流式问答」
-回答问题。LLM 与 Embedding 都按 Provider 解耦配置，既能在本地用 Ollama 跑全离线链路，也能直接
-接 OpenRouter / DeepSeek 等云端 API。
+`inner-rag` 把企业里散落的文档（PDF / Word / Excel / 纯文本，扫描件与图片走 OCR）解析、分块、向量化
+入库，再基于「向量检索 + 引用溯源 + 流式问答」回答问题。Chat 模型与 Embedding 模型是两个**互相独立的
+可插拔后端**：同一条链路既能跑本地 Ollama（全离线），也能直接接 OpenRouter / DeepSeek / 任意 OpenAI
+兼容网关，改两个环境变量即可切换，业务代码、接口与数据库都不用动。
 
 ![主界面](images/main.png)
 
-## 背景与目标
+## 设计目标
 
-这个项目来自一次真实的重构。最初的 `rag` 项目能跑通「上传 → 检索 → 问答」的主流程，但工程上
-积累了不少问题：LangChain 已升级到 1.x 而代码还在用被移除的旧 API（`langchain.text_splitter`
-等），依赖没有版本锁定、环境靠手写 venv + pip，只能绑定 Ollama 一种模型后端，数据库用 MySQL
-且建表靠运行时 `create_all`，检索相关度算错、会话历史取错、后台任务用已关闭的 Session 等逻辑
-缺陷也散落在各处。
-
-因此有了 `inner-rag`：保留原项目的前后端形态作为起点，按阶段做一次彻底的重构，目标是让它成为
-一个「能拿得出手、也能真正部署」的工程化项目。四个核心目标：
-
-1. **升级到最新的 LangChain 生态**（LangChain 1.x / core 1.6+）与匹配的 Python 3.13；
-2. **用 `uv` 管理** Python 版本、依赖与虚拟环境（含 `uv.lock` 锁定）；
-3. **模型后端可插拔**：不只支持 Ollama，也能直接用 OpenRouter / DeepSeek / 任意 OpenAI 兼容端点；
-4. **全面工程化重构**：Alembic 迁移（开发 SQLite / 部署可切 PostgreSQL）、可插拔 OCR、检索质量可观测、测试与 CI 友好的结构。
-
-阶段划分（详见文末「阶段进展」；完整执行路线与每阶段测试门禁见 `docs/roadmap.md`）：
-
-| 阶段 | 目标 | 状态 |
-| --- | --- | --- |
-| Phase 0 | 建立独立的 uv 项目与 git 基线（src 布局、可按包安装） | ✅ |
-| Phase 1 | 全量升级陈旧 API + 修复必修逻辑缺陷，行为保持稳定 | ✅ |
-| Phase 1.5 | 开发默认改用 SQLite，密钥统一从 `.env` 读取 | ✅ |
-| Phase 2 | Provider 抽象层（Ollama / OpenRouter / DeepSeek / OpenAI 兼容），API 优先 | 待开始 |
-| Phase 3 | OCR 迁移到视觉大模型（VLM），替代本地 PaddleOCR | 待开始 |
-| Phase 4 | 检索质量评测、Rerank、任务队列、结构化日志 | 待开始 |
-| Phase 5 | 交付：Docker 镜像、PostgreSQL、CI 与部署文档 | 待开始 |
+1. **多 Provider**：Chat 覆盖 `ollama` / `openrouter` / `deepseek` / `openai`（兼容自建网关）/
+   `mock`，Embedding 覆盖 `ollama` / `openrouter` / `openai` / `mock`；两者可自由组合，例如
+   「Chat 走 DeepSeek + Embedding 走 OpenRouter」，或「Chat 走云端 + Embedding 走本地」。
+2. **可插拔**：所有模型后端实现收敛在 `src/inner_rag/providers/` 一层，服务层、API 层、缓存层只依赖
+   统一接口；新增一个 provider 只需补一条 provider 元数据与一个构造分支。
+3. **好部署**：`uv sync` + 一次 `alembic upgrade head` 就能跑起来；开发默认 SQLite 单文件、零外部依赖，
+   部署时只改 `DATABASE_URL` 即可切到 PostgreSQL，另附 Dockerfile 与 docker compose。
+4. **工程化可用**：Alembic 迁移、CORS 白名单、文件名与导入路径校验、密钥只从 `.env` 读取、
+   检索质量可观测（真实相关度、缓存命中率、空召回率、平均延迟）、68 个离线用例 + 可选的真实 API 联网验收。
 
 ## 特性
 
@@ -46,11 +30,14 @@
   返回**真实**相关性分数（1 - 余弦距离），MMR 召回项如实标注为「无分数」而不是伪造 1.0
 - **流式问答**：SSE 逐 token 推送，先推引用来源再推答案，前端实时渲染并展示相关度
 - **会话管理**：多轮对话（取**最近** N 条历史）、会话列表、消息与引用来源持久化
-- **性能与成本控制**：Embedding 缓存（按模型隔离 key）+ 检索结果缓存（LRU + TTL，按知识库精确失效）、
-  批量嵌入 + 信号量限流
+- **模型后端可插拔**：Chat 与 Embedding 各自独立选型（Ollama / OpenRouter / DeepSeek /
+  OpenAI 兼容 / 离线 mock），只改 `.env` 里的两个变量；provider 名称写错或漏填 Key 时，得到的是
+  「该去 .env 改哪个变量」的明确提示（503），而不是一个 500 或看不懂的 401
+- **性能与成本控制**：Embedding 缓存（按 `provider:model` 身份隔离）+ 检索结果缓存（LRU + TTL，
+  按知识库精确失效）、批量嵌入 + 信号量限流、模型实例在工厂内复用
 - **可观测性**：检索日志、Prompt 日志、缓存命中率 / 空召回率 / 平均延迟统计
 - **工程化**：uv 锁依赖、Alembic 迁移、CORS 白名单、文件名与导入路径安全校验、
-  ruff 静态检查、44 个离线 pytest 用例、Dockerfile + docker compose
+  ruff + mypy 检查、68 个离线 pytest 用例（另有可选的真实 API 联网验收）、Dockerfile + docker compose
 
 ## 架构
 
@@ -71,8 +58,8 @@ flowchart LR
     RAG --> VS
     VS --> CACHE["QueryCache / EmbeddingCache"]
     VS --> CHROMA[("ChromaDB")]
-    VS --> EMB["Embedding Provider"]
-    RAG --> LLM["LLM Provider"]
+    VS --> EMB["Embedding Provider<br/>（providers 工厂）"]
+    RAG --> LLM["LLM Provider<br/>（providers 工厂）"]
     KB --> DB[("SQLite（开发默认）<br/>PostgreSQL（部署）")]
     DOC --> DB
     CHAT --> DB
@@ -81,13 +68,17 @@ flowchart LR
 检索链路：查询 → 检索缓存 → 向量库（cosine 距离换算为相关度）→ 阈值过滤 → 组装 Prompt
 （含最近几轮对话历史）→ LLM（流式 / 非流式）→ 落库并返回引用来源。
 
+`providers/` 内部分层：`specs`（provider 元数据与校验，含 base_url / 模型名 / key 环境变量名）、
+`chat`（Chat 模型构造 + 离线 mock 模型）、`embeddings`（向量模型构造 + 截断包装 + 离线 mock 向量）、
+`factory`（按配置构造并缓存实例、探活、模型发现）。
+
 ## 技术栈
 
 | 层次 | 选型 |
 | --- | --- |
 | 语言 / 包管理 | Python 3.13（uv 管理）、`uv.lock` 锁定依赖 |
 | Web 框架 | FastAPI 0.141+、Uvicorn 0.54+、SSE 流式响应 |
-| LLM 编排 | LangChain 1.x（`langchain-core` 1.6+、`langchain-text-splitters`、`langchain-ollama`） |
+| LLM 编排 | LangChain 1.x（`langchain-core` 1.6+、`langchain-text-splitters`）+ `langchain-ollama`（本地）/ `langchain-openai`（OpenAI 兼容云端） |
 | 向量库 | ChromaDB 1.5+（persistent client）/ `langchain-chroma` |
 | 关系库 | SQLite（开发默认）+ PostgreSQL 16（部署可选）+ SQLAlchemy 2.1 + Alembic 1.20 |
 | 文档解析 | pypdf、PyMuPDF、python-docx、docx2txt、openpyxl、xlrd、Pillow、chardet |
@@ -100,8 +91,8 @@ flowchart LR
 
 - Linux（当前主力开发环境）/ macOS（Windows 建议 WSL2）
 - [uv](https://docs.astral.sh/uv/)（不需要本地预装 Python，uv 会按 `.python-version` 自行安装 3.13）
-- 模型侧二选一：**云端 API（开发阶段推荐，最快）** 需要一个 OpenRouter / DeepSeek 的 key；
-  或本地 [Ollama](https://ollama.com/)（全离线）
+- 模型侧三选一：**云端 API（推荐，最快）** 需要 OpenRouter / DeepSeek 的 key；或本地
+  [Ollama](https://ollama.com/)（全离线）；或 `mock` provider（零依赖，仅演示与验收链路）
 - 数据库：开发默认 SQLite，**无需任何安装**；只有部署阶段才需要 Docker 或一个 PostgreSQL 实例
 
 ```bash
@@ -153,21 +144,45 @@ uv run uvicorn inner_rag.main:app --reload --port 8010
 
 ```bash
 curl -s http://localhost:8010/api/system/health
-# {"status":"healthy","ollama":true,"llm_model":"qwen3:14b",...}
+# {"status":"healthy","version":"0.3.0",
+#  "llm":{"provider":"deepseek","model":"deepseek-chat","ok":true,...},
+#  "embedding":{"provider":"openrouter","model":"liquid/lfm-2.5-embedding-350m:free","ok":true,...}}
 ```
 
-> `ollama: false` / `status: degraded` 说明 Ollama 未启动或模型名不对；检索与问答会因此失败，
-> 但知识库、文档等管理接口仍可用。
+> `status: degraded` 时看 `llm.error` / `embedding.error`：文案会直接指出该去 `.env` 改哪个变量
+> （例如漏填 `OPENROUTER_API_KEY`）或哪个服务连不上。检索与问答会因此失败，但知识库、文档等
+> 管理接口仍可用。
 
-### 4. 准备模型
+### 4. 选择模型 Provider
 
-云端 API 路线（key 放 `.env`，provider 开关在 Phase 2 落地，详见 `docs/roadmap.md`）：
+Chat 与 Embedding 是**两个独立开关**，改 `.env` 即可，代码无需改动：
+
+| Provider | 可用于 | 说明 |
+| --- | --- | --- |
+| `ollama` | chat + embedding | `http://localhost:11434`，本地、无需 key |
+| `openrouter` | chat + embedding | `https://openrouter.ai/api/v1`，OpenAI 兼容聚合网关，一个 key 用数百个模型 |
+| `deepseek` | **仅 chat** | `https://api.deepseek.com/v1`；官方**没有 embeddings 接口**，写成 `EMBEDDING_PROVIDER=deepseek` 会得到明确报错 |
+| `openai` | chat + embedding | `https://api.openai.com/v1`；也可指向任何 OpenAI 兼容的自建网关 |
+| `mock` | chat + embedding | 不联网、不需要 key、输出确定性；用于本地演示 / CI / 降级验收（只有词面相似度，不能用来评估检索效果） |
+
+`GET /api/system/providers` 会列出全部可选项、当前选择与 key 是否已配置。
+
+云端 API 路线（推荐，最快）。chat 与 embedding 分属不同厂商也完全可以：
 
 ```bash
-# .env 中填写，例如：
-# LLM_PROVIDER=openrouter
-# OPENROUTER_API_KEY=...
+# .env —— Chat 走 DeepSeek，Embedding 走 OpenRouter
+LLM_PROVIDER=deepseek
+DEEPSEEK_API_KEY={{DEEPSEEK_API_KEY}}
+
+EMBEDDING_PROVIDER=openrouter
+OPENROUTER_API_KEY={{OPENROUTER_API_KEY}}
+EMBEDDING_MAX_INPUT_CHARS=400    # 见下方「小上下文模型」说明
 ```
+
+> 默认云端向量模型是 `liquid/lfm-2.5-embedding-350m:free`（免费、1024 维），但它的输入上下文只有
+> **512 token**，而分块按字符数切（`CHUNK_SIZE=1000`），所以建议同时设 `EMBEDDING_MAX_INPUT_CHARS=400`
+> 让截断行为可预期。另：免费路由的数据可能被上游留存用于训练，有合规要求时请换付费模型
+> （如 `openai/text-embedding-3-small`）。
 
 本地 Ollama 路线：
 
@@ -175,6 +190,9 @@ curl -s http://localhost:8010/api/system/health
 ollama pull qwen3:14b            # 对话模型
 ollama pull qwen3-embedding:8b   # 向量模型（必须与建库时的 embedding 保持一致）
 ```
+
+完全离线路线：`LLM_PROVIDER=mock` + `EMBEDDING_PROVIDER=mock`，不需要任何模型服务，也能跑通
+「上传 → 检索 → 带引用回答」的完整链路。
 
 ### 5. 启动前端
 
@@ -220,9 +238,15 @@ npm run dev        # http://localhost:3000，通过 Vite 代理访问后端 8010
 | `PORT` | `8010` | 后端端口（`8000` 在共享机器上常被占用），需与 `frontend/vite.config.js` 代理一致 |
 | `DATABASE_URL` | `sqlite:///./data/inner_rag.db` | 开发默认 SQLite；部署切 `postgresql+psycopg://...` 后重跑 `alembic upgrade head` |
 | `SQLITE_TIMEOUT` | `30` | SQLite 等锁超时（秒）；同时影响 `busy_timeout` |
-| `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` | 空 | 云端 API 密钥，只写在 `.env`，不要提交 |
+| `LLM_PROVIDER` | `ollama` | chat 后端：`ollama` / `openrouter` / `deepseek` / `openai` / `mock` |
+| `EMBEDDING_PROVIDER` | `ollama` | 向量后端：`ollama` / `openrouter` / `openai` / `mock`（DeepSeek 没有 embedding 接口） |
+| `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | 空 | 云端 API 密钥，只写在 `.env`，不要提交 |
+| `*_CHAT_MODEL` / `*_EMBEDDING_MODEL` | 见 `.env.example` | 各 provider 的模型名；换 embedding 模型等于换向量空间，需要重建索引 |
+| `EMBEDDING_MAX_INPUT_CHARS` | `0` | 单条输入的字符上限（0 = 不截断）；小上下文模型（如 512 token 的免费 embedding）建议设 `400` |
+| `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` / `LLM_TIMEOUT` / `LLM_MAX_RETRIES` | `0.3` / `2048` / `60` / `2` | 云端调用参数（Ollama 也复用 temperature 与输出长度） |
 | `AUTO_CREATE_TABLES` | `false` | 表结构交给 Alembic；仅测试/一次性库设为 `true` |
-| `OLLAMA_LLM_MODEL` / `OLLAMA_EMBEDDING_MODEL` | `qwen3:14b` / `qwen3-embedding:8b` | embedding 标识会写入知识库并做一致性校验 |
+| `OLLAMA_LLM_MODEL` / `OLLAMA_EMBEDDING_MODEL` | `qwen3:14b` / `qwen3-embedding:8b` | 本地 Ollama 的模型名 |
+| `embedding_key`（建库时写入） | `provider:model` | 知识库会锁定建库时的 embedding 身份，换模型后会被校验拦下并提示重建索引 |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `200` | 分块参数，影响召回粒度 |
 | `TOP_K` / `RERANK_TOP_K` | `8` / `5` | 向量召回数 / 进入 Prompt 的条数 |
 | `RETRIEVAL_SCORE_THRESHOLD` | `0.3` | 相关度阈值（cosine 语义，`1 - 距离`）；过高会导致空召回 |
@@ -246,9 +270,10 @@ inner-rag/
 │   ├── models/               # SQLAlchemy 2.0 ORM 模型
 │   ├── schemas/              # Pydantic 请求/响应模型
 │   ├── api/                  # 路由：kb / document / chat / system
+│   ├── providers/            # 模型后端抽象：specs / chat / embeddings / factory（多 provider）
 │   └── services/             # parser、ocr、embedding、vector_store、rag、cache、retrieval_log
 ├── scripts/                  # 运维与排查脚本 + start.sh
-├── tests/                    # 离线 pytest 用例（假 embedding / 假 LLM）
+├── tests/                    # 离线 pytest 用例 + 可选的真实 API 联网验收（-m live）
 ├── docs/                     # 执行路线、测试门禁与阶段记录
 ├── frontend/                 # Vue 3 + Vite 前端
 ├── docker-compose.yml        # 部署用：PostgreSQL 16（默认）/ 后端容器（profile=app）
@@ -275,10 +300,11 @@ inner-rag/
 | GET | `/api/chat/conversations` | 会话列表 |
 | GET | `/api/chat/conversations/{id}/messages` | 会话消息（含引用来源） |
 | DELETE | `/api/chat/conversations/{id}` | 删除会话 |
-| GET | `/api/system/health` | 健康检查（后端 + 模型连通性） |
+| GET | `/api/system/health` | 健康检查（后端 + Chat/Embedding provider 连通性与错误原因） |
+| GET | `/api/system/providers` | 全部可用 provider、当前选择、key 是否已配置（不返回密钥） |
 | GET | `/api/system/stats` | 检索统计 + 缓存状态 |
 | GET | `/api/system/config` | 前端可用的非敏感运行时配置 |
-| GET | `/api/system/models` | Ollama 可用模型列表 |
+| GET | `/api/system/models` | 当前 provider 的可用模型列表（Ollama / 云端 `/models`） |
 | POST | `/api/system/cache/clear?kb_id=` | 手动清理缓存（指定知识库或全清） |
 
 ## 运维与排查脚本
@@ -300,13 +326,16 @@ uv run scripts/query_probe.py <kb_id> "查询词" --strategy hybrid --k 8
 ```bash
 uv run ruff check .            # 静态检查
 uv run ruff format .           # 代码格式化
-uv run pytest                  # 全量测试（离线，不依赖 Ollama / 数据库服务）
+uv run pytest                  # 全量测试（离线；live 用例默认 deselect）
+uv run pytest -m live -q       # 真实 provider 联网验收（需 OPENROUTER_API_KEY，会产生少量费用）
 uv run pytest -q tests/test_api.py::test_chat_stream_events_and_persistence
 uv run mypy                    # 类型检查（配置见 pyproject.toml 的 [tool.mypy]）
 ```
 
-测试说明：`tests/conftest.py` 在导入应用之前就把环境切到临时 SQLite 与临时目录，并用确定性的
-假 embedding / 假 LLM 替换真实 Provider，因此测试**完全离线**、可复现，也不会产生模型调用费用。
+测试说明：`tests/conftest.py` 在导入应用之前就把环境切到临时 SQLite、临时目录与固定的 `mock`
+provider，并用确定性的假 embedding / 假 LLM 替换真实 Provider，因此默认测试**完全离线**、可复现，
+也不会产生模型调用费用，且不会受开发者本机 `.env` 的影响。`pytest -m live` 才会真实调用云端 API
+（无 key 时自动 skip）。
 
 数据库迁移：
 
@@ -317,10 +346,9 @@ uv run alembic check                                 # 校验模型与迁移是�
 uv run alembic downgrade -1                           # 回退一步
 ```
 
-## 部署（后置）
+## 部署
 
-开发阶段用 SQLite + 云端 API 就能跑通全链路，Docker 与 PostgreSQL 是交付阶段的收尾工作
-（见 `docs/roadmap.md` 的 Phase 5）。
+开发阶段用 SQLite + 云端 API 就能跑通全链路（见 `docs/roadmap.md` 的 Phase 5 收尾计划）。
 
 只跑数据库（后端仍跑在宿主机上，改代码无需重建镜像）：
 
@@ -346,64 +374,20 @@ docker compose logs -f api
 cd frontend && npm run build          # 产物在 frontend/dist，可用任意静态服务器托管
 ```
 
-## 阶段进展与重构说明
-
-### Phase 0：uv 项目与 git 基线 ✅
-
-- 新仓库 `inner-rag`，`git init` 全新历史；原 `rag` 项目作为起点原样复制后提交基线
-- 采用 `src/inner_rag/` 布局，`pyproject.toml`（hatchling）声明包，`uv.lock` 锁定 100+ 依赖
-- Python 由 uv 管理（`.python-version` = 3.13），不再依赖本地已装的解释器
-
-### Phase 1：全量升级陈旧 API + 修复必修缺陷 ✅
-
-依赖与 API 升级（保留原行为）：
-
-- `langchain.text_splitter` 在 LangChain 1.x 已移除 → 改用 `langchain-text-splitters`
-- `ChatOllama(streaming=...)` 等旧参数移除 → 流式由调用方 `astream` 决定
-- Pydantic v1 风格 `class Config` → `model_config = ConfigDict(from_attributes=True)`
-- `datetime.utcnow()` → `datetime.now(UTC)`；`asyncio.get_event_loop()` → `asyncio.to_thread()`
-- SQLAlchemy `declarative_base()` → `DeclarativeBase` / `Mapped` / `mapped_column`
-- 关系库从 MySQL 切到 PostgreSQL 16 + psycopg 3，建表从运行时 `create_all` 改为 Alembic 迁移
-
-必修缺陷（有意的行为变更）：
-
-| 问题 | 原行为 | 现行为 |
-| --- | --- | --- |
-| 相关度算错 | `similarity_search_with_relevance_scores` 返回的其实是原始距离；MMR 项被虚构为 0.8/1.0 | 统一用 `similarity_search_with_score` + `1 - 距离` 换算并 clamp 到 `[0,1]`；MMR 项如实返回 `null` |
-| 会话历史取错 | 取**最早** 20 条消息 | 取**最近** `HISTORY_MAX_MESSAGES` 条 |
-| 后台任务用坏 Session | 把请求级 `Session` 传进 `BackgroundTasks`（响应返回时已关闭） | 后台任务自行创建/关闭 Session |
-| 上传无大小前置校验 | 先整体读进内存再判断大小 | 流式落盘 + 边写边校验，超限立即中断并清理 |
-| 文件名未净化 | 直接用上传的文件名拼路径（可路径穿越） | 只取 basename + 随机前缀，落地在该知识库目录内 |
-| 检索缓存粒度粗 / 不失效 | 按 query 全局缓存，入库/删除后仍返回旧结果 | key 带 `kb_id`，入库、删除、重建后精确失效该知识库 |
-| 静默吞异常 | 检索异常被吞掉后返回空结果 | 异常向上抛出，由 API 层给出明确错误 |
-| 解析失败无提示 | 扫描件/图片写入占位文本污染索引 | 显式抛错，提示启用 OCR |
-| CORS 不安全 | `allow_origins=["*"]` + `allow_credentials=True`（浏览器实际会拒绝） | 白名单化，由 `CORS_ORIGINS` 配置 |
-| embedding 换模型无校验 | 静默检索到不同向量空间的向量 | 知识库记录 embedding 标识，写入/检索时校验并给出重建指引 |
-| 前端代理失效 | `baseURL` 写成 `' http://localhost:8000/api'`（含前导空格，且绕过 Vite 代理） | 改为相对路径 `/api`，代理目标统一为后端 `8010` |
-
-### Phase 1.5：数据库改为 SQLite 优先 ✅
-
-- 开发默认 `sqlite:///./data/inner_rag.db`，单文件零依赖；部署时可整体切到 PostgreSQL，代码与迁移不变
-- SQLite 引擎开启 WAL 与 `foreign_keys=ON` 并设置等锁超时：避免并发写入时 `database is locked`，
-  同时让删除知识库的级联清理真实生效
-- 密钥（云端 API key）统一从 `.env` 读取，`.env` 不入库
-
-### Phase 2 ~ Phase 5：规划中
-
-完整执行路线、每阶段交付物与「上传前必须通过的测试门禁」见 `docs/roadmap.md`。概览：
-
-- **Phase 2 Provider 抽象**：`ChatProvider` / `EmbeddingProvider` 工厂，支持 Ollama / OpenRouter /
-  DeepSeek / OpenAI 兼容端点，Chat 与 Embedding 独立选型，`/api/system/providers` 健康检查
-- **Phase 3 OCR 升级**：用视觉大模型（OpenRouter / HuggingFace VLM）替代本地 PaddleOCR，
-  处理扫描件与图片型 PDF
-- **Phase 4 检索质量与工程化**：构建评测集（召回率 / 引用准确率 / 延迟）、Rerank 精排、
-  任务队列与结构化日志
-- **Phase 5 交付**：Docker 镜像 + PostgreSQL 一键部署、CI（ruff + mypy + pytest + 镜像构建）
-
 ## 常见问题
 
 **Q：`/api/system/health` 返回 `degraded`？**
-A：后端正常，但连不上 Ollama。检查 `OLLAMA_BASE_URL`、`ollama serve` 是否运行、模型名是否已 `pull`。
+A：看响应里的 `llm.error` / `embedding.error`，它能直接定位原因：漏填 API Key（会指名该写哪个变量）、
+provider 名写错（会列出可选值）、服务连不上（会带上 URL）或模型未拉取。也可用 `GET /api/system/providers`
+看当前选择与 key 状态。
+
+**Q：`EMBEDDING_PROVIDER=deepseek` 报错？**
+A：DeepSeek 官方只有 chat completion，没有 embeddings 接口。chat 用 DeepSeek、embedding 用
+OpenRouter / OpenAI / Ollama 是常见组合，两个变量本来就是独立的。
+
+**Q：云端 embedding 报输入过长 / 结果很怪？**
+A：小上下文模型（如免费的 512 token embedding）需要配 `EMBEDDING_MAX_INPUT_CHARS`（字符数）
+把每个分块截到上下文以内；截断是真截断，会损失分块尾部信息，必要时同时调小 `CHUNK_SIZE`。
 
 **Q：上传成功但文档 `status=failed`？**
 A：看 `error_msg`。常见原因：扫描件/图片未启用 OCR（`OCR_BACKEND=none`）、密码保护的 PDF、
@@ -435,6 +419,15 @@ A：多进程/多实例部署、并发写入较多、或需要主从备份时。
 **Q：API key 放哪里？**
 A：只放 `.env`（已被 `.gitignore` 忽略），`.env.example` 里只留空占位。密钥一旦泄漏，
 请立即在对应平台吊销并更换。
+
+## 路线图
+
+- **已完成**：多 Provider 抽象层（Chat / Embedding 独立选型、`mock` 降级路径、`/api/system/providers`）、
+  SQLite 优先与密钥外置、Alembic 迁移、Docker 资产
+- **下一步**：OCR 迁移到视觉大模型（扫描件与图片型 PDF）
+- **之后**：检索质量评测集与 Rerank、任务队列与结构化日志、CI 与 PostgreSQL 部署验证
+
+每一阶段的交付物、测试门禁（G0/G1/G2）与进度记录见 `docs/roadmap.md`。
 
 ## License
 

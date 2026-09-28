@@ -19,30 +19,30 @@
 - **小步提交**：每阶段末尾按主题拆分 commit（含 `Co-Authored-By: Warp <agent@warp.dev>`），先跑门禁
   再 push。
 
-## 2. 当前状态（Phase 1.5 结束）
+## 2. 当前状态（Phase 2 结束）
 
 已经具备：
 
-- 分层清晰、可测试的后端：`src/inner_rag/{api,core,models,schemas,services}`，`uv` 管理依赖与 Python 3.13
+- 分层清晰、可测试的后端：`src/inner_rag/{api,core,models,providers,schemas,services}`，`uv` 管理依赖
+- **模型后端可插拔**：Chat 与 Embedding 各自独立选型（`ollama` / `openrouter` / `deepseek` /
+  `openai` / `mock`），只改 `.env` 两个变量；instance 在工厂内按配置缓存复用
 - 文档解析（PDF / Word / Excel / 文本）、Chroma 向量库（cosine 空间、按 KB 分 collection）、
   `similarity` / `mmr` / `hybrid` 三策略检索与**真实相关度**、SSE 流式问答、引用溯源、会话历史
 - Alembic 迁移（SQLite 与 PostgreSQL 通吃）、`AUTO_CREATE_TABLES=false`、SQLite 开启 WAL 与
   `foreign_keys=ON`
-- 44 个完全离线的 pytest 用例（假 embedding + 假 LLM）、`ruff` 与 `mypy` 干净
+- 68 个完全离线的 pytest 用例（fake / mock provider，无网络）+ 4 个 `-m live` 真实 API 用例（默认 deselect）、
+  `ruff` 与 `mypy` 干净
 - 前端（Vue 3 + Vite）与后端端口 8010 打通，SSE 手写解析
 
 尚未具备（这就是后续阶段要解决的）：
 
-1. **模型层写死 Ollama**：`services/embedding.py`、`services/rag.py` 直接构造 `OllamaEmbeddings` /
-   `ChatOllama`，`Settings.embedding_key` 也是硬编码的 `ollama:` 前缀 → 无法接云端 API，与「API 优先」
-   直接冲突，是 Phase 2 的第一优先级
-2. **没有 mock provider**：真实 provider 无法在测试中稳定覆盖，也没有「无 key 也能跑」的降级路径
-3. **OCR 只有 `none` / `paddle`**：扫描件与图片型 PDF 走不通，且 `paddle` 依赖重（Phase 3）
-4. **检索质量未量化**：没有评测集、没有 rerank，`hybrid` 只是启发式合并，无法回答「改进了多少」
-5. **工程化欠账**：后台解析依赖进程内 `BackgroundTasks`（无重试、无进度），缓存是进程内 LRU
+1. **OCR 只有 `none` / `paddle`**：扫描件与图片型 PDF 走不通，且 `paddle` 依赖重（Phase 3）
+2. **检索质量未量化**：没有评测集、没有 rerank，`hybrid` 只是启发式合并，无法回答「改进了多少」
+3. **工程化欠账**：后台解析依赖进程内 `BackgroundTasks`（无重试、无进度），缓存是进程内 LRU
    （多 worker 失效），无结构化日志与 trace
-6. **前端未做本地构建验证**：本机没有 Node/npm，只在静态层面修过 bug
-7. **部署产物未验证**：Dockerfile / compose 已写好但从未真正构建过
+4. **前端未做本地构建验证**：本机没有 Node/npm，只在静态层面修过 bug
+5. **部署产物未验证**：Dockerfile / compose 已写好但从未真正构建过
+6. **真实云端链路仅在 G2 手工跑过一次**：没有稳定性/成本监控，也没有多 provider 回归矩阵
 
 ## 3. 阶段总览
 
@@ -51,7 +51,7 @@
 | Phase 0 | uv 项目与 git 基线 | src 布局、`uv.lock`、依赖清理 | ✅ |
 | Phase 1 | 陈旧 API 全量升级 + 必修缺陷 | LangChain 1.x、Alembic、44 个离线用例 | ✅ |
 | Phase 1.5 | SQLite 优先 + 密钥外置 | SQLite 引擎加固、`.env`/`.env.example` | ✅ |
-| Phase 2 | 多 Provider（API 优先） | `providers/` 层、云端 API 跑通问答 | 下一步 |
+| Phase 2 | 多 Provider（API 优先） | `providers/` 层、云端 API 跑通问答 | ✅ |
 | Phase 3 | OCR 迁移到视觉大模型 | VLM OCR 后端、扫描件可检索 | 待开始 |
 | Phase 4 | 检索质量与工程化 | 评测集、Rerank、任务队列、结构化日志 | 待开始 |
 | Phase 5 | 交付 | Docker 镜像、PostgreSQL、CI、部署文档 | 待开始 |
@@ -102,10 +102,11 @@ kill $SRV
 
 # 5) 密钥与敏感文件自检（只应有 ok 行）
 git ls-files | grep -E '(^|/)\.env$' && echo "ERROR: .env 被跟踪" || echo "ok: .env 未被跟踪"
-git ls-files --others --exclude-standard | grep -E '^\.env' && echo "INFO: 本地存在未跟踪的 .env（符合预期）"
-# 启发式：只报“像真 key 的值”，文档里的 KEY=... 占位不算
-git diff HEAD | grep -nE '(API|SECRET|TOKEN)_KEY=[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,}' \
-  && echo "ERROR: diff 里出现疑似密钥" || echo "ok: diff 无密钥"
+# 注意：.env 被 .gitignore 忽略，因此 `--others --exclude-standard` 不会列出它，要用 check-ignore
+git check-ignore -q .env && echo "ok: .env 已被 gitignore 忽略" || echo "WARN: .env 未被忽略"
+# 启发式：只统计“像真 key 的值”的条数，不回显匹配内容；文档里的 KEY=... 占位不算
+FOUND=$(git --no-pager diff HEAD | grep -cE '(API|SECRET|TOKEN)_KEY=[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9_-]{20,}')
+[ "$FOUND" = "0" ] && echo "ok: diff 无密钥" || echo "ERROR: diff 里疑似密钥 $FOUND 处"
 ```
 
 期望：
@@ -122,6 +123,7 @@ git diff HEAD | grep -nE '(API|SECRET|TOKEN)_KEY=[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-
 
 ```bash
 # 需要 .env 中已填好 OPENROUTER_API_KEY（或 DEEPSEEK_API_KEY）
+uv run pytest -m live -q          # 真实 API 冒烟：chat / 流式 / embedding 维度 / 端到端验收
 uv run uvicorn inner_rag.main:app --reload --port 8010
 
 curl --noproxy '*' -s localhost:8010/api/system/health
@@ -141,7 +143,7 @@ curl --noproxy '*' -N -X POST localhost:8010/api/chat/stream \
 
 每个阶段固定包含：目标 → 主要改动 → 阶段专属测试 → 完成定义（DoD）。门禁沿用 G1，另有专项要求。
 
-### Phase 2 — 多 Provider 抽象（API 优先）
+### Phase 2 — 多 Provider 抽象（API 优先）✅
 
 目标：把模型后端从「写死 Ollama」变成配置驱动的可插拔工厂，云端 API 成为默认路径。
 
@@ -168,6 +170,16 @@ curl --noproxy '*' -N -X POST localhost:8010/api/chat/stream \
 
 DoD：`.env` 里填 `LLM_PROVIDER=openrouter` + `OPENROUTER_API_KEY` 后，`/api/system/health` 全绿，
 上传 → 提问 → 引用来源全链路走通；README 更新 provider 配置表与「DeepSeek 无 embeddings」说明。
+
+落地结果（实际交付相对计划的差异）：
+- 除计划中的 `chat.py` / `embeddings.py` / `factory.py` 外，多出一个 `specs.py`：provider 元数据
+  （base_url、模型、key 环境变量名、文档链接、备注）集中一处，校验错误能直接引用环境变量名
+- 默认向量模型选 `openrouter` 的 `liquid/lfm-2.5-embedding-350m:free`（免费但只有 **512 token**
+  上下文，因此新增 `EMBEDDING_MAX_INPUT_CHARS` 显式截断开关）
+- `/health` 不因配置错误返回 5xx，而是 `status: degraded` + `llm.error` / `embedding.error`；
+  provider 配置错误在 API 层统一映射为 **503**，且文案指向该改的变量
+- `LangChain` 侧统一改用 `langchain-openai` 接管全部云端 OpenAI 兼容端点，Ollama 仍用
+  `langchain-ollama`；不再手写 `httpx` 探活（`/models` 发现逻辑收进 `factory._discover_models`）
 
 ### Phase 3 — OCR 迁移到视觉大模型（VLM）
 
@@ -241,6 +253,8 @@ DoD：新机器按 README 从零跑通，且 CI 绿。
 | 本机无 Node/npm | 前端无法构建验证 | Phase 2 起把前端改动限制在最小范围；构建验证放到有 Node 的环境或 CI |
 | 本机无 docker socket 权限 | 无法本地验证镜像 | Phase 5 前不阻塞主流程；镜像验证交给 CI 或具备权限的机器 |
 | 测试全用假 provider | 真实 API 行为差异漏测 | 每阶段一次 G2 + `-m live` 用例覆盖真实调用 |
+| 免费/小上下文 embedding 模型 | 输入超上下文（如 512 token）、上游可能留存数据训练 | 用 `EMBEDDING_MAX_INPUT_CHARS` 显式截断（可配合调小 `CHUNK_SIZE`）；有合规要求时换付费模型；换 embedding 模型后必须重建索引 |
+| provider 配置写错（错名 / 缺 key / DeepSeek 当 embedding） | 问答骤报 503 | `/api/system/providers` 与 `/health` 的 `llm.error` / `embedding.error` 直接给出变量名与可选值；`.env.example` 与 README 同步说明 |
 | 迁移漂移（模型改了没生成 revision） | 部署时炸 | G1 固定跑 `alembic check`，新增字段必须带 revision |
 
 ## 8. 进度记录
@@ -248,4 +262,30 @@ DoD：新机器按 README 从零跑通，且 CI 绿。
 - **Phase 0** ✅ uv 项目骨架、依赖锁定、源码迁到 `src/inner_rag/`
 - **Phase 1** ✅ LangChain 1.x 全量升级 + 必修缺陷修复；Alembic、Docker 资产、44 个离线用例
 - **Phase 1.5** ✅ 开发默认 SQLite（WAL + 外键 + 等锁超时）、密钥外置到 `.env`、本路线文档
-- **Phase 2** 进行中（下一步）
+- **Phase 2** ✅ `providers/` 抽象层（`specs` / `chat` / `embeddings` / `factory`）：Chat 与 Embedding
+  独立选型（ollama / openrouter / deepseek / openai / mock）、`ProviderError` → 503、`/api/system/providers`、
+  `embedding_key` 改为 `provider:model`、模型实例缓存；68 个离线用例 + 4 个 `-m live` 用例；
+  G1 五步全绿（ruff / mypy / pytest / 迁移四步 / 冒烟启动 + 密钥扫描）
+- **Phase 3** 待开始（OCR 迁移到视觉大模型）
+
+## 9. 已修复的关键缺陷（工程记录）
+
+这些是 Phase 1 修复的行为变更，README 不再展开（README 只讲系统能力），细节留在这里备查：
+
+| 问题 | 原行为 | 现行为 |
+| --- | --- | --- |
+| 相关度算错 | `similarity_search_with_relevance_scores` 返回的其实是原始距离；MMR 项被虚构为 0.8/1.0 | 统一用 `similarity_search_with_score` + `1 - 距离` 换算并 clamp 到 `[0,1]`；MMR 项如实返回 `null` |
+| 会话历史取错 | 取**最早** 20 条消息 | 取**最近** `HISTORY_MAX_MESSAGES` 条 |
+| 后台任务用坏 Session | 把请求级 `Session` 传进 `BackgroundTasks`（响应返回时已关闭） | 后台任务自行创建/关闭 Session |
+| 上传无大小前置校验 | 先整体读进内存再判断大小 | 流式落盘 + 边写边校验，超限立即中断并清理 |
+| 文件名未净化 | 直接用上传的文件名拼路径（可路径穿越） | 只取 basename + 随机前缀，落地在该知识库目录内 |
+| 检索缓存粒度粗 / 不失效 | 按 query 全局缓存，入库/删除后仍返回旧结果 | key 带 `kb_id`，入库、删除、重建后精确失效该知识库 |
+| 静默吞异常 | 检索异常被吞掉后返回空结果 | 异常向上抛出，由 API 层给出明确错误 |
+| 解析失败无提示 | 扫描件/图片写入占位文本污染索引 | 显式抛错，提示启用 OCR |
+| CORS 不安全 | `allow_origins=["*"]` + `allow_credentials=True`（浏览器实际会拒绝） | 白名单化，由 `CORS_ORIGINS` 配置 |
+| embedding 换模型无校验 | 静默检索到不同向量空间的向量 | 知识库记录 embedding 标识，写入/检索时校验并给出重建指引 |
+| 前端代理失效 | `baseURL` 写成 `' http://localhost:8000/api'`（含前导空格且绕过 Vite 代理） | 改为相对路径 `/api`，代理目标统一为后端 `8010` |
+
+另外两项工程决策保留在代码与 `.env.example` 里：LangChain 1.x 已移除的旧 API
+（`langchain.text_splitter`、`ChatOllama(streaming=...)` 等）全部换成新写法；建表从运行时
+`create_all` 改为 Alembic 迁移（`AUTO_CREATE_TABLES` 仅留给测试/一次性库）。
