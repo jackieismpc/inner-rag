@@ -1,6 +1,7 @@
 # inner-rag
 
 > 多 Provider、可插拔、好部署的企业内部知识库问答系统 —— FastAPI + LangChain 1.x + zvec + SQLite / PostgreSQL
+> （内置登录与知识库级 ACL：账号由运维脚本发放，成员按知识库授权只读 / 可写）
 
 `inner-rag` 把企业里散落的文档（PDF / Word / Excel / 纯文本，扫描件与图片走 OCR）解析、分块、向量化
 入库，再基于「向量检索 + 引用溯源 + 流式问答」回答问题。Chat 模型与 Embedding 模型是两个**互相独立的
@@ -9,49 +10,39 @@
 
 ![主界面](images/main.png)
 
-## 设计目标
-
-1. **多 Provider**：Chat 覆盖 `ollama` / `openrouter` / `deepseek` / `openai`（兼容自建网关）/
-   `mock`，Embedding 覆盖 `ollama` / `openrouter` / `openai` / `mock`；两者可自由组合，例如
-   「Chat 走 DeepSeek + Embedding 走 OpenRouter」，或「Chat 走云端 + Embedding 走本地」。
-2. **可插拔**：所有模型后端实现收敛在 `src/inner_rag/providers/` 一层，服务层、API 层、缓存层只依赖
-   统一接口；新增一个 provider 只需补一条 provider 元数据与一个构造分支。
-3. **好部署**：`uv sync` + 一次 `alembic upgrade head` 就能跑起来；开发默认 SQLite 单文件、零外部依赖，
-   部署时只改 `DATABASE_URL` 即可切到 PostgreSQL，另附 Dockerfile 与 docker compose。
-4. **工程化可用**：Alembic 迁移、CORS 白名单、文件名与导入路径校验、密钥只从 `.env` 读取、
-  检索质量可观测（真实相关度、缓存命中率、空召回率、平均延迟）、89 个离线用例 + 可选的真实 API 联网验收、
-  `benchmark/` 指标脚本与 README 基准表。
-
 ## 特性
 
-- **多格式文档解析**：PDF（逐页）、Word（docx / doc）、Excel（xlsx / xls）、文本类
-  （txt / md / csv / json / xml / html）；图片与扫描页走可插拔 OCR 后端
-- **向量化与检索**：zvec（Alibaba 开源的嵌入式向量库，本项目向量库选型）持久化，每个知识库一个独立
-  collection，统一 cosine 空间；迁移期仍保留 ChromaDB 实现（见「技术栈」下的向量库选型说明）
-- **多策略检索**：`similarity`（余弦相似度）/ `mmr`（多样性去重）/ `hybrid`（两者融合），
-  返回**真实**相关性分数（1 - 余弦距离），MMR 召回项如实标注为「无分数」而不是伪造 1.0
-- **流式问答**：SSE 逐 token 推送，先推引用来源再推答案，前端实时渲染并展示相关度
-- **会话管理**：多轮对话（取**最近** N 条历史）、会话列表、消息与引用来源持久化
-- **模型后端可插拔**：Chat 与 Embedding 各自独立选型（Ollama / OpenRouter / DeepSeek /
-  OpenAI 兼容 / 离线 mock），只改 `.env` 里的两个变量；provider 名称写错或漏填 Key 时，得到的是
-  「该去 .env 改哪个变量」的明确提示（503），而不是一个 500 或看不懂的 401
-- **性能与成本控制**：Embedding 缓存（按 `provider:model` 身份隔离）+ 检索结果缓存（LRU + TTL，
-  按知识库精确失效）、批量嵌入 + 信号量限流、模型实例在工厂内复用
-- **可观测性**：检索日志、Prompt 日志、缓存命中率 / 空召回率 / 平均延迟统计
-- **工程化**：uv 锁依赖、Alembic 迁移、CORS 白名单、文件名与导入路径安全校验、
-  ruff + mypy 检查、89 个离线 pytest 用例（另有可选的真实 API 联网验收）、Dockerfile + docker compose
+- **文档与检索**：PDF / Word / Excel / 文本类解析（图片与扫描页走可插拔 OCR）；每个知识库一个独立
+  collection，统一 cosine 空间；`similarity` / `mmr` / `hybrid` 三种策略，返回**真实**相关度
+  （`1 - 余弦距离`），MMR 召回项如实标注「无分数」而不是伪造 1.0
+- **流式问答与会话**：SSE 逐 token 推送（先来源后答案），多轮对话取**最近** N 条历史，
+  会话、消息与引用来源全部持久化
+- **身份与访问控制**：本地账号 + JWT（HS256）登录，密码只存 argon2id 哈希（带随机盐），停用账号立即失效；
+  知识库级 ACL 分 `read`（看库 / 提问）/ `write`（+ 增删文档）/ `owner`（+ 改设置 / 删库 / 授权成员）三级，
+  列表按「我拥有或被授权」过滤
+- **模型后端可插拔**：Chat 与 Embedding 各自独立选型（Ollama / OpenRouter / DeepSeek / OpenAI 兼容 /
+  离线 mock），只改 `.env`；provider 名写错或漏填 Key 时得到「该去 .env 改哪个变量」的明确提示（503）
+- **性能与成本控制**：Embedding 缓存（按 `provider:model` 隔离）+ 检索缓存（LRU + TTL，按库精确失效）、
+  批量嵌入 + 信号量限流、模型实例在工厂内复用
+- **可观测与工程化**：检索 / Prompt 日志与缓存命中率、空召回率、延迟统计；uv 锁依赖、Alembic 迁移、
+  生产环境拒绝用默认 / 过短的 JWT 密钥启动、ruff + mypy、128 个离线 pytest 用例（另 5 个联网验收）、
+  Dockerfile + docker compose
 
 ## 架构
 
 ```mermaid
 flowchart LR
-    FE["Vue 3 前端<br/>SSE 流式渲染"] --> API
-    subgraph API["FastAPI 后端"]
+    FE["Vue 3 前端<br/>登录态 + SSE 流式渲染"] --> API
+    subgraph API["FastAPI 后端（除登录与 /health 外均需登录）"]
+        AUTHAPI["认证 API<br/>登录 / 当前用户"]
+        GUARD["鉴权依赖 get_current_user<br/>+ ensure_kb_access"]
         KB["知识库 API"]
         DOC["文档 API"]
         CHAT["对话 API / SSE"]
         SYS["系统状态 API"]
     end
+    GUARD --> ACL["core/access.py<br/>read / write / owner"]
+    ACL --> DB
     CHAT --> RAG["RAG Service<br/>检索 + Prompt + LLM"]
     DOC --> DS["Document Service<br/>解析 → 分块 → 入库"]
     DS --> PARSE["Parser<br/>PDF/Word/Excel/Image"]
@@ -83,6 +74,7 @@ flowchart LR
 | LLM 编排 | LangChain 1.x（`langchain-core` 1.6+、`langchain-text-splitters`）+ `langchain-ollama`（本地）/ `langchain-openai`（OpenAI 兼容云端）/ `langchain-deepseek`（DeepSeek 官方集成） |
 | 向量库 | **zvec**（Alibaba 开源、嵌入式、HNSW + cosine，本项目选型）；当前代码仍为 ChromaDB 1.5+（persistent client）/ `langchain-chroma`，按 Phase 4 迁移 |
 | 关系库 | SQLite（开发默认）+ PostgreSQL 16（部署可选）+ SQLAlchemy 2.1 + Alembic 1.20 |
+| 认证与权限 | JWT（PyJWT，HS256）+ argon2id 口令哈希（argon2-cffi）+ 知识库级 ACL（owner / member） |
 | 文档解析 | pypdf、PyMuPDF、python-docx、docx2txt、openpyxl、xlrd、Pillow、chardet |
 | 前端 | Vue 3 + Vite + Pinia + Tailwind CSS 3 |
 | 质量 | ruff、pytest（+ pytest-asyncio）、mypy |
@@ -96,11 +88,10 @@ flowchart LR
 
 ### 0. 前置条件
 
-- Linux（当前主力开发环境）/ macOS（Windows 建议 WSL2）
-- [uv](https://docs.astral.sh/uv/)（不需要本地预装 Python，uv 会按 `.python-version` 自行安装 3.13）
-- 模型侧三选一：**云端 API（推荐，最快）** 需要 OpenRouter / DeepSeek 的 key；或本地
-  [Ollama](https://ollama.com/)（全离线）；或 `mock` provider（零依赖，仅演示与验收链路）
-- 数据库：开发默认 SQLite，**无需任何安装**；只有部署阶段才需要 Docker 或一个 PostgreSQL 实例
+- Linux / macOS（Windows 建议 WSL2）+ [uv](https://docs.astral.sh/uv/)（会自行安装 Python 3.13）
+- 模型三选一：云端 API（需 OpenRouter / DeepSeek 的 key，推荐）/ 本地 [Ollama](https://ollama.com/)
+  （全离线）/ `mock`（零依赖，仅演示与验收链路）
+- 数据库：开发默认 SQLite 单文件，**无需任何安装**；只有部署阶段才需要 Docker 或 PostgreSQL
 
 ```bash
 # 安装 uv
@@ -163,7 +154,19 @@ curl -s http://localhost:8010/api/system/health
 > `llm.warning` 是「能用但值得注意」的提示，不影响 `status`：例如某家 provider 的 `/models`
 > 不完整（DeepSeek 只列主推模型，旧别名仍可调用），此时不会误报为不可用。
 
-### 4. 选择模型 Provider
+### 4. 创建第一个账号
+
+系统**不提供注册接口**：企业内部账号由管理员发放。用运维脚本建号（密码交互式输入、不回显）：
+
+```bash
+uv run scripts/create_user.py admin          # 建号；密码交互式输入（≥8 位仅告警不阻断）
+uv run scripts/create_user.py --list         # 看现有账号（含启用状态）
+```
+
+所有业务接口都要求登录（`Authorization: Bearer <token>`），只有 `POST /api/auth/login` 与
+`GET /api/system/health` 免鉴权。前端访问 <http://localhost:3000> 时会直接跳到登录页。
+
+### 5. 选择模型 Provider
 
 Chat 与 Embedding 是**两个独立开关**，改 `.env` 即可，代码无需改动：
 
@@ -191,10 +194,8 @@ OPENROUTER_API_KEY={{OPENROUTER_API_KEY}}
 EMBEDDING_MAX_INPUT_CHARS=400    # 见下方「小上下文模型」说明
 ```
 
-> 默认云端向量模型是 `liquid/lfm-2.5-embedding-350m:free`（免费、1024 维），但它的输入上下文只有
-> **512 token**，而分块按字符数切（`CHUNK_SIZE=1000`），所以建议同时设 `EMBEDDING_MAX_INPUT_CHARS=400`
-> 让截断行为可预期。另：免费路由的数据可能被上游留存用于训练，有合规要求时请换付费模型
-> （如 `openai/text-embedding-3-small`）。
+> 免费的 `liquid/lfm-2.5-embedding-350m:free`（1024 维）只有 **512 token** 上下文，建议同时设
+> `EMBEDDING_MAX_INPUT_CHARS=400`；免费路由的数据可能被上游留存，有合规要求时换付费模型。
 
 本地 Ollama 路线：
 
@@ -206,7 +207,7 @@ ollama pull qwen3-embedding:8b   # 向量模型（必须与建库时的 embeddin
 完全离线路线：`LLM_PROVIDER=mock` + `EMBEDDING_PROVIDER=mock`，不需要任何模型服务，也能跑通
 「上传 → 检索 → 带引用回答」的完整链路。
 
-### 5. 启动前端
+### 6. 启动前端
 
 ```bash
 cd frontend
@@ -214,13 +215,27 @@ npm install
 npm run dev        # http://localhost:3000，通过 Vite 代理访问后端 8010
 ```
 
+打开后先用第 4 步创建的账号登录；未登录的请求会被后端拒绝（401），前端会自动回到登录页。
+
 ## 使用指南
 
-1. **建知识库**：前端「新建知识库」或 `curl -X POST localhost:8010/api/kb -H 'Content-Type: application/json' -d '{"name":"产品手册"}'`
+先用账号换一个 token（12 小时有效），后续请求都带上它：
+
+```bash
+TOKEN=$(curl -s -X POST localhost:8010/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["access_token"])')
+```
+
+1. **建知识库**：前端「新建知识库」，或
+   `curl -X POST localhost:8010/api/kb -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"name":"产品手册"}'`
+   （建库者即 `owner`；知识库列表只返回自己拥有或被授权的库）
 2. **上传文档**：前端拖拽上传，或
 
    ```bash
    curl -X POST localhost:8010/api/doc/upload \
+     -H "Authorization: Bearer $TOKEN" \
      -F kb_id=1 -F files=@./手册.pdf
    ```
 
@@ -230,7 +245,7 @@ npm run dev        # http://localhost:3000，通过 Vite 代理访问后端 8010
 
    ```bash
    curl -N -X POST localhost:8010/api/chat/stream \
-     -H 'Content-Type: application/json' \
+     -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
      -d '{"kb_id":1,"question":"这款产品的保修政策是什么？"}'
    ```
 
@@ -238,10 +253,13 @@ npm run dev        # http://localhost:3000，通过 Vite 代理访问后端 8010
    → `done`（完整答案）。每个事件形如 `data: {"type":"sources","data":[...]}`。
 4. **重新处理/重建索引**：单文档失败可 `POST /api/doc/{doc_id}/reprocess`；换了 embedding 模型则
    必须重建索引（见下方脚本），否则查询向量与库内向量不在同一空间。
+5. **成员权限**：知识库详情页的「成员管理」（仅 `owner` 可见）可按用户名授权：
+   `read` 能看文档、问问题，`write` 还能上传 / 删除文档，改库设置与删库仅 `owner`。权限每次请求
+   实时判定，改权限或移除成员后立即生效，无需重新登录。
 
 ## 配置说明
 
-全部配置项见 `.env.example`（按 应用 / 服务端 / 数据库 / 密钥 / 模型 / 向量库 / 上传 / OCR / 检索 /
+全部配置项见 `.env.example`（按 应用 / 认证 / 服务端 / 数据库 / 密钥 / 模型 / 向量库 / 上传 / OCR / 检索 /
 缓存 / CORS / 日志 分组）；本地实际生效的值写在 `.env`（已被 gitignore，不入库）。
 几个容易踩坑的关键项：
 
@@ -249,24 +267,21 @@ npm run dev        # http://localhost:3000，通过 Vite 代理访问后端 8010
 | --- | --- | --- |
 | `PORT` | `8010` | 后端端口（`8000` 在共享机器上常被占用），需与 `frontend/vite.config.js` 代理一致 |
 | `DATABASE_URL` | `sqlite:///./data/inner_rag.db` | 开发默认 SQLite；部署切 `postgresql+psycopg://...` 后重跑 `alembic upgrade head` |
-| `SQLITE_TIMEOUT` | `30` | SQLite 等锁超时（秒）；同时影响 `busy_timeout` |
-| `LLM_PROVIDER` | `ollama` | chat 后端：`ollama` / `openrouter` / `deepseek` / `openai` / `mock` |
-| `EMBEDDING_PROVIDER` | `ollama` | 向量后端：`ollama` / `openrouter` / `openai` / `mock`（DeepSeek 没有 embedding 接口） |
+| `LLM_PROVIDER` / `EMBEDDING_PROVIDER` | `ollama` | 两个**独立**开关；向量侧没有 `deepseek`（官方无 embeddings 接口） |
 | `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | 空 | 云端 API 密钥，只写在 `.env`，不要提交 |
-| `*_CHAT_MODEL` / `*_EMBEDDING_MODEL` | 见 `.env.example` | 各 provider 的模型名；换 embedding 模型等于换向量空间，需要重建索引。DeepSeek 默认 `deepseek-flash`，模型名以官方文档为准 |
-| `EMBEDDING_MAX_INPUT_CHARS` | `0` | 单条输入的字符上限（0 = 不截断）；小上下文模型（如 512 token 的免费 embedding）建议设 `400` |
-| `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` / `LLM_TIMEOUT` / `LLM_MAX_RETRIES` | `0.3` / `2048` / `60` / `2` | 云端调用参数（Ollama 也复用 temperature 与输出长度） |
-| `LLM_REASONING_EFFORT` | 空 | 推理强度 `minimal`/`low`/`medium`/`high`，**仅 DeepSeek 生效**；留空则不发送该字段 |
+| `EMBEDDING_MAX_INPUT_CHARS` | `0` | 单条输入的字符上限（0 = 不截断）；小上下文模型建议设 `400` |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `200` | 分块参数，影响召回粒度；改动后建议重建索引并跑基准 |
+| `RETRIEVAL_SCORE_THRESHOLD` | `0.3` | 相关度阈值（`1 - 余弦距离`）；过高会导致空召回 |
 | `AUTO_CREATE_TABLES` | `false` | 表结构交给 Alembic；仅测试/一次性库设为 `true` |
-| `OLLAMA_LLM_MODEL` / `OLLAMA_EMBEDDING_MODEL` | `qwen3:14b` / `qwen3-embedding:8b` | 本地 Ollama 的模型名 |
-| `embedding_key`（建库时写入） | `provider:model` | 知识库会锁定建库时的 embedding 身份，换模型后会被校验拦下并提示重建索引 |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `200` | 分块参数，影响召回粒度 |
-| `TOP_K` / `RERANK_TOP_K` | `8` / `5` | 向量召回数 / 进入 Prompt 的条数 |
-| `RETRIEVAL_SCORE_THRESHOLD` | `0.3` | 相关度阈值（cosine 语义，`1 - 距离`）；过高会导致空召回 |
-| `HISTORY_MAX_MESSAGES` | `20` | 送入模型的历史消息条数（取最近 N 条） |
+| `AUTH_SECRET_KEY` | `dev-only-insecure-...` | JWT 签名密钥（HS256）；`DEBUG=false` 时用默认值或短于 32 字节会**拒绝启动** |
+| `AUTH_TOKEN_TTL_MINUTES` | `720` | 令牌有效期（分钟）；JWT 无状态、无法单独撤销，短 TTL 是泄漏后的唯一收敛手段 |
+| `ENABLE_DOCS` | `true` | 是否开放 `/docs` `/redoc` `/openapi.json`；生产环境建议关闭 |
 | `OCR_BACKEND` | `none` | `none` 或 `paddle`；关闭时图片/扫描件会明确报错而不是写入占位文本 |
-| `ALLOW_LOCAL_IMPORT` | `false` | 是否允许 `import-path`（服务端文件系统读取能力），开启时配合 `LOCAL_IMPORT_ROOT` 限定目录 |
+| `ALLOW_LOCAL_IMPORT` | `false` | 是否允许 `import-path`（服务端文件系统读取能力），配合 `LOCAL_IMPORT_ROOT` 限定目录 |
 | `CORS_ORIGINS` | `http://localhost:3000,...` | 前端来源白名单 |
+
+其余项（各 provider 模型名、top_k、缓存大小、日志开关等）都在 `.env.example` 里有逐项注释；
+其中「换 embedding 模型 = 换向量空间」需要重建索引。
 
 ## 目录结构
 
@@ -279,13 +294,13 @@ inner-rag/
 ├── migrations/               # Alembic 迁移（env.py + versions/）
 ├── src/inner_rag/
 │   ├── main.py               # FastAPI 应用入口（CORS、异常处理、路由注册）
-│   ├── core/                 # 配置（pydantic-settings）、数据库引擎与会话
-│   ├── models/               # SQLAlchemy 2.0 ORM 模型
+│   ├── core/                 # 配置、数据库引擎与会话、安全原语（argon2id / JWT）、ACL 判定、身份上下文
+│   ├── models/               # SQLAlchemy 2.0 ORM 模型（含 user / kb_member）
 │   ├── schemas/              # Pydantic 请求/响应模型
-│   ├── api/                  # 路由：kb / document / chat / system
+│   ├── api/                  # 路由：auth / kb / document / chat / system + 鉴权依赖（deps.py）
 │   ├── providers/            # 模型后端抽象：specs / chat / embeddings / factory（多 provider）
 │   └── services/             # parser、ocr、embedding、vector_store、rag、cache、retrieval_log
-├── scripts/                  # 运维与排查脚本 + start.sh
+├── scripts/                  # 运维与排查脚本（含建号 create_user.py）+ start.sh
 ├── tests/                    # 离线 pytest 用例 + 可选的真实 API 联网验收（-m live）
 ├── benchmark/                # 基准脚本：指标、评测集运行、结果落盘、README 基准表维护
 ├── docs/                     # 开发计划、架构契约、评测与测试策略、龙族评测集、阶段记录
@@ -298,12 +313,21 @@ inner-rag/
 
 ## API 一览
 
+除 `POST /api/auth/login`、`GET /api/system/health` 外，**所有接口都要求**
+`Authorization: Bearer <token>`；未登录返回 401（带 `WWW-Authenticate: Bearer`），
+已登录但无权访问他人知识库返回 403。
+
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/kb` | 知识库列表（分页、关键词） |
+| POST | `/api/auth/login` | 用户名 + 密码换 JWT（失败统一返回 401 且文案一致，不泄露账号是否存在） |
+| GET | `/api/auth/me` | 当前登录用户（刷新页面后恢复登录态用；无 logout 接口，客户端丢弃 token 即可） |
+| GET | `/api/kb` | 知识库列表（只含我拥有或被授权的；分页、关键词） |
 | POST | `/api/kb` | 新建知识库（自动写入当前 embedding 标识） |
 | GET | `/api/kb/{kb_id}` | 详情（含 collection 向量数） |
-| PUT / DELETE | `/api/kb/{kb_id}` | 更新 / 删除（连带删除向量与上传文件） |
+| PUT / DELETE | `/api/kb/{kb_id}` | 更新 / 删除（仅 `owner`；连带删除向量与上传文件） |
+| GET | `/api/kb/{kb_id}/members` | 成员列表（仅 `owner`） |
+| POST | `/api/kb/{kb_id}/members` | 按用户名授权 / 改权限（仅 `owner`；重复授权即改权限） |
+| DELETE | `/api/kb/{kb_id}/members/{user_id}` | 移除成员授权（仅 `owner`，立即生效） |
 | GET | `/api/doc` | 文档列表（分页、`status`、`keyword`） |
 | POST | `/api/doc/upload` | 多文件上传（流式落盘 + 大小限制 + 后台解析入库） |
 | POST | `/api/doc/import-path` | 从服务端路径导入（默认关闭，见 `ALLOW_LOCAL_IMPORT`） |
@@ -324,6 +348,11 @@ inner-rag/
 ## 运维与排查脚本
 
 ```bash
+uv run scripts/create_user.py <username>          # 建号（密码交互式输入、不回显）
+uv run scripts/create_user.py <username> --display-name "张三"         # 建号时带显示名
+uv run scripts/create_user.py <username> --reset-password             # 重置密码（忘记密码时用）
+uv run scripts/create_user.py <username> --disable / --enable         # 停用 / 启用账号
+uv run scripts/create_user.py --list                                  # 列出账号
 uv run scripts/reindex_kb.py <kb_id>              # 重建整个知识库索引（换 embedding 模型后必做）
 uv run scripts/reindex_kb.py <kb_id> --keep-vectors  # 保留向量，仅重新解析文档
 uv run scripts/reindex_doc.py <doc_id>            # 重建单个文档索引
@@ -342,6 +371,7 @@ uv run ruff check .            # 静态检查
 uv run ruff format .           # 代码格式化
 uv run pytest                  # 全量测试（离线；live 用例默认 deselect）
 uv run pytest -m live -q       # 真实 provider 联网验收（需 OPENROUTER_API_KEY / DEEPSEEK_API_KEY，会产生少量费用）
+uv run pytest -q tests/test_auth.py              # 只看登录 / 鉴权 / ACL 用例
 uv run pytest -q tests/test_api.py::test_chat_stream_events_and_persistence
 uv run mypy                    # 类型检查（配置见 pyproject.toml 的 [tool.mypy]）
 uv run python -m benchmark.run_bench --mode fixtures   # 基准脚本离线自检（评测集校验 + 指标算法）
@@ -352,7 +382,8 @@ uv run python -m benchmark.run_bench --mode fixtures   # 基准脚本离线自�
 测试说明：`tests/conftest.py` 在导入应用之前就把环境切到临时 SQLite、临时目录与固定的 `mock`
 provider，并用确定性的假 embedding / 假 LLM 替换真实 Provider，因此默认测试**完全离线**、可复现，
 也不会产生模型调用费用，且不会受开发者本机 `.env` 的影响。`pytest -m live` 才会真实调用云端 API
-（无 key 时自动 skip）。
+（无 key 时自动 skip）。除 `client` 外还提供 `other_client`（另一个用户），用来验证跨库 403 隔离；
+账号在测试里直接建（与 `create_user.py` 同一条路径），因为系统没有注册接口。
 
 数据库迁移：
 
@@ -380,19 +411,16 @@ uv run python -m benchmark.run_bench --mode kb --kb-id 3 --update-readme
 uv run python -m benchmark.run_bench --mode kb --kb-id 3 --answer --update-readme
 ```
 
-- `fixtures` 模式只验证脚本与指标算法（mock embedding 没有语义能力），**不写表也不落盘**，避免把自检数字当成成绩、也避免留下随时间漂移的噪声文件；
-- `kb` 模式用真实知识库，并绕过 QueryCache 直接查向量库，召回与延迟都是真值；`--answer` 按题计费；
-- 同一「日期 + 配置」的行会被覆盖，不同配置各占一行，改动前后一对比就知道优化有没有效果。
+- `fixtures` 模式只验证脚本与指标算法（mock embedding 没有语义能力），**不写表也不落盘**，避免把自检数字当成成绩；
+- `kb` 模式用真实知识库并绕过 QueryCache 直接查向量库，召回与延迟都是真值，`--answer` 按题计费。
 
 <!-- BEGIN BENCHMARK -->
 | 日期 | 配置 | 题数 | Recall@k | MRR | 页命中率 | 要点命中率 | 引用精度 | 拒答正确率 | 检索 p50 | 检索 p95 | 端到端 p50 | 结果文件 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 <!-- END BENCHMARK -->
 
-表格内容由 `--update-readme` 写入，**不要手工编辑这两个标记之间的区域**（会被下一次运行覆盖）；
-kb 模式每次运行还会在 `benchmark/results/` 留一份完整 JSON（含逐题明细与配置快照），便于回溯
-（fixtures 自检不落盘）。
-参数、指标口径与注意事项见 `benchmark/README.md`。
+表格由 `--update-readme` 写入，**不要手工编辑标记之间的区域**；kb 模式每次还在 `benchmark/results/`
+留一份含逐题明细的 JSON，便于回溯。指标口径与注意事项见 `benchmark/README.md`。
 
 ## 部署
 
@@ -426,21 +454,7 @@ cd frontend && npm run build          # 产物在 frontend/dist，可用任意�
 
 **Q：`/api/system/health` 返回 `degraded`？**
 A：看响应里的 `llm.error` / `embedding.error`，它能直接定位原因：漏填 API Key（会指名该写哪个变量）、
-provider 名写错（会列出可选值）、服务连不上（会带上 URL）或模型未拉取。也可用 `GET /api/system/providers`
-看当前选择与 key 状态。
-
-**Q：`/api/system/health` 里 `llm.warning` 提示「/models 未列出 xxx」？**
-A：这不算故障：DeepSeek 的 `/models` 只列当前主推模型（如 `deepseek-flash`），旧模型别名仍可调用。
-配置的模型确实不存在时对话会直接报错，建议按[官方文档](https://api-docs.deepseek.com)更新
-`DEEPSEEK_CHAT_MODEL`；其余 provider 的模型列表可信，模型名写错会被健康检查判为 `degraded`。
-
-**Q：`EMBEDDING_PROVIDER=deepseek` 报错？**
-A：DeepSeek 官方只有 chat completion，没有 embeddings 接口。chat 用 DeepSeek、embedding 用
-OpenRouter / OpenAI / Ollama 是常见组合，两个变量本来就是独立的。
-
-**Q：云端 embedding 报输入过长 / 结果很怪？**
-A：小上下文模型（如免费的 512 token embedding）需要配 `EMBEDDING_MAX_INPUT_CHARS`（字符数）
-把每个分块截到上下文以内；截断是真截断，会损失分块尾部信息，必要时同时调小 `CHUNK_SIZE`。
+provider 名写错（会列出可选值）、服务连不上（会带上 URL）或模型未拉取。
 
 **Q：上传成功但文档 `status=failed`？**
 A：看 `error_msg`。常见原因：扫描件/图片未启用 OCR（`OCR_BACKEND=none`）、密码保护的 PDF、
@@ -454,31 +468,26 @@ A：先跑 `uv run scripts/query_probe.py <kb_id> "问题"`。若命中了分块
 **Q：换了 embedding 模型后检索结果全乱？**
 A：向量空间变了，旧向量全部失效。执行 `uv run scripts/reindex_kb.py <kb_id>` 重建索引。
 
-**Q：`init_db` 启动报错提示缺表？**
-A：表结构由 Alembic 管理，先执行 `uv run alembic upgrade head`（或设置 `AUTO_CREATE_TABLES=true`
-用于临时库）。
+**Q：接口返回 401？**
+A：未登录或 token 已过期（默认 12 小时），重新登录即可；前端遇到 401 会自动回登录页。
+若是脚本调用，检查是否带了 `Authorization: Bearer <token>`（SSE 流式接口也一样）。
 
-**Q：端口冲突？**
-A：改 `.env` 的 `PORT`，同时改 `frontend/vite.config.js` 的代理目标（或设置 `VITE_API_TARGET`）。
+**Q：接口返回 403「无权访问该知识库」？**
+A：登录没问题，但当前账号对该知识库没有权限。知识库只对「拥有者 + 被授权成员」可见：
+请拥有者在知识库详情页的「成员管理」里授权（`read` / `write`）。被移除授权或降低权限后立即生效。
 
-**Q：SQLite 报 `database is locked`？**
-A：连接建立时已开启 WAL 与 `busy_timeout`；若仍偶发，把 `.env` 的 `SQLITE_TIMEOUT` 调大，或避免
-同时上传多个大文件（SQLite 同时只允许一个写事务）。真要并发写入就切 PostgreSQL。
-
-**Q：什么时候需要切 PostgreSQL？**
-A：多进程/多实例部署、并发写入较多、或需要主从备份时。改 `DATABASE_URL` 后重跑
-`uv run alembic upgrade head` 即可，两者共用同一套迁移（见 `docs/DEVELOPMENT_PLAN.md` 的 Phase 10）。
-
-**Q：API key 放哪里？**
-A：只放 `.env`（已被 `.gitignore` 忽略），`.env.example` 里只留空占位。密钥一旦泄漏，
-请立即在对应平台吊销并更换。
+**Q：忘记密码 / 要新增账号？**
+A：没有注册与找回入口（企业内部账号由管理员发放）：`uv run scripts/create_user.py <username>`
+建号，`--reset-password` 重置，`--disable` 停用（停用后已签发的 token 立即失效）。
 
 ## 路线图
 
 - **已完成**：多 Provider 抽象层（Chat / Embedding 独立选型、OpenRouter / DeepSeek 官方集成、`mock`
-  降级路径、`/api/system/providers`）、SQLite 优先与密钥外置、Alembic 迁移、Docker 资产
+  降级路径、`/api/system/providers`）、SQLite 优先与密钥外置、Alembic 迁移、Docker 资产；
+  身份与访问控制（Phase 3）——本地账号 + JWT 登录、argon2id 口令哈希、知识库级 ACL（owner / 只读 /
+  可写）、前端登录页与按权限渲染、`scripts/create_user.py` 建号
 - **进行中**：开发文档体系（`docs/DEVELOPMENT_PLAN.md` 及其子文档）、龙族真实评测集与 `benchmark/` 指标脚本
-- **Phase 3–10**：身份与访问控制（单租户登录 + 知识库级 ACL）→ 向量库统一到 zvec → 可观测性
+- **Phase 4–10**：向量库统一到 zvec → 可观测性
   （LangSmith 追踪 + 运行日志与指标）→ 评测体系与准确性基线 → 可插拔深化
   （provider 注册表、关系库 / 缓存 / 队列抽象）→ 用评测集驱动检索与回答质量提升 →
   OCR / VLM 文档面扩展 → 交付（Docker / PostgreSQL / CI）

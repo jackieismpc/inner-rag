@@ -7,11 +7,14 @@
 
 ```
 src/inner_rag/
-├── main.py            # FastAPI 装配：lifespan（配置校验）、中间件、异常处理器、路由挂载
+├── main.py            # FastAPI 装配：lifespan（配置校验 + 生产密钥校验）、中间件顺序（CORS 最外层）、
+│                      #   异常处理器、路由挂载、docs 开关（ENABLE_DOCS）
 ├── api/               # HTTP 边界：只做参数校验与序列化，不做业务
+│   ├── auth.py        #   登录 / 当前用户
+│   ├── deps.py        #   鉴权依赖：Token → user；ensure_kb_access / ensure_doc_access（把 ACL 映射成 HTTP 语义）
 │   ├── chat.py        #   对话（含 SSE 流式）
 │   ├── document.py    #   上传 / 列表 / 删除 / 重新向量化
-│   ├── kb.py          #   知识库 CRUD
+│   ├── kb.py          #   知识库 CRUD + 成员授权
 │   └── system.py      #   health / providers / stats / metrics
 ├── services/          # 业务逻辑（与具体后端解耦的层）
 │   ├── parser.py      #   文本抽取（PDF / DOCX / TXT / MD …）
@@ -27,9 +30,14 @@ src/inner_rag/
 │   ├── chat.py        #   Chat 实例构造（每 provider 一个分支）
 │   ├── embeddings.py  #   Embedding 实例构造
 │   └── factory.py     #   对外门面：get_chat_model / get_embeddings / chat_health
-├── models/            # SQLAlchemy ORM（knowledge_base / document / conversation / user / kb_acl）
+├── models/            # SQLAlchemy ORM（knowledge_base / document / conversation / user / kb_member）
 ├── schemas/           # Pydantic 出入参
-└── core/              # config（唯一配置入口）、database（会话/引擎）、security（鉴权与 ACL，Phase 3）
+└── core/              # 纯策略与基础设施：不依赖 FastAPI 请求对象、不返回 HTTP 语义
+    ├── config.py      #   唯一配置入口
+    ├── database.py    #   引擎 / 会话
+    ├── security.py    #   口令哈希（argon2id）与 Token 签发 / 校验（JWT）
+    ├── context.py     #   身份 ContextVar + IdentityContextMiddleware（纯 ASGI）
+    └── access.py      #   ACL 判定：level_of / level_map / accessible_kb_ids
 ```
 
 依赖方向**只能向下**：
@@ -46,6 +54,8 @@ api  →  services  →  providers / core
 2. `api/` 不许直接用 SQLAlchemy 会话或 provider 实例，只调 `services/`。
 3. `core/config.py` 是唯一读环境变量的地方；其它模块一律 `from inner_rag.core.config import settings`。
 4. 新增依赖必须进 `pyproject.toml`；可选后端的重依赖用 `uv sync --extra` 分组，不能变成必装。
+5. `core/` 只做判定与查询，**不抛 `HTTPException`**：401/403 由 `api/deps.py` 映射。
+   这样权限策略能被脚本等非 HTTP 入口复用，且「谁是策略、谁是协议」界限清楚。
 
 ## 2. 插件点总表
 
@@ -60,7 +70,7 @@ api  →  services  →  providers / core
 | OCR | `services/ocr.py` | none（默认）/ paddle / vlm（Phase 9） | `OCR_BACKEND`、`OCR_LANG` | 启动时记录后端与可用性 | `tests/test_parser.py` |
 | 追踪 / 指标 | `core/observability.py`（Phase 5 新增） | loguru + LangSmith（+ 预留 OTLP） | `LANGSMITH_*`、`LOG_FORMAT`、`METRICS_BACKEND` | `/api/system/metrics` | Phase 5 新增 |
 | 评测器 | `services/evaluation.py`（Phase 6 新增） | 指标 + LLM-as-judge | 评测集路径、judge 模型 | 报告产出 | Phase 6 新增 |
-| 身份 / 权限 | `core/security.py` + FastAPI 依赖（Phase 3 新增） | 本地账号（密码哈希）+ 会话 Token；知识库级 ACL | `AUTH_SECRET_KEY`、`AUTH_TOKEN_TTL_MINUTES`（Phase 3 定稿） | `/api/system/health` 免鉴权 | Phase 3 新增 |
+| 身份 / 权限 | `core/security.py`（策略原语）+ `core/access.py`（ACL）+ `api/deps.py`（HTTP 映射） | 本地账号（argon2id 口令哈希）+ JWT（HS256）；知识库级 ACL：`owner` / 成员 `read` / 成员 `write` | `AUTH_SECRET_KEY`、`AUTH_TOKEN_TTL_MINUTES`、`ENABLE_DOCS` | `/api/system/health` 免鉴权（白名单另有 `/api/auth/login`） | `tests/test_auth.py` |
 
 「五件套」标准：**接口 + 内置实现 + 配置项 + 探活 + 契约测试**。少任何一件都不算可插拔完成——
 尤其是探活与契约测试，这两件最容易漏，漏了就会在换后端时才发现问题。
@@ -209,22 +219,39 @@ class TaskQueue(Protocol):
 `core/observability.py` 暴露 `Tracer` 门面；LangSmith 不可用时降级为本地计时日志。
 细节（trace 树、metadata 约定、日志 schema、指标）见 `docs/observability.md`。
 
-### 3.8 身份与访问控制（Phase 3）
+### 3.8 身份与访问控制
 
-**目标**：把「谁在用、能看哪个知识库」变成一等公民。本期范围：**单租户 + 本地账号 + 知识库级 ACL**；
-明确不做多租户、部门隔离、文档级权限、SSO/LDAP 与审计（见 `docs/DEVELOPMENT_PLAN.md` Phase 3）。
+**范围**：单租户 + 本地账号 + 知识库级 ACL。明确不做多租户、部门隔离、文档级权限、SSO/LDAP、
+审计、注册接口与 logout 接口（见 `docs/DEVELOPMENT_PLAN.md` Phase 3 与第 9 节 ADR）。
 
-- **认证**：账号存 `users` 表，密码只存**强哈希**（不可逆，如 bcrypt/argon2）；登录成功签发会话 Token
-  （JWT 或服务端 session），Token 带 `user_id` 与过期时间，过期 / 篡改一律 401。
-- **注入方式**：`AuthMiddleware` / FastAPI 依赖解析 Token，把 `user_id` 写进 `contextvars`；
-  日志与 trace 按 `request_id` + `user_id` 串联，**不靠每个函数手动传参**。
-- **授权**：知识库级 ACL（`knowledge_bases.owner_id` + 授权用户关联表）。`/api/kb`、`/api/doc`、
-  `/api/chat` 路由先解析目标 `kb_id`，再校验当前用户可读 / 可写：未登录 → **401**，
-  已登录但无权限 → **403**；列表接口只返回有权限的库。
-- **检索边界**：权限判定发生在进入服务层**之前**，检索只在用户有权限的 kb 内发生；
+**分层**：策略在 `core/access.py`，HTTP 映射在 `api/deps.py`（`core/` 不产生 HTTP 语义，见第 1 节规则 5）。
+
+- **账号与口令**：账号存 `users` 表，口令只存 **argon2id** 哈希（`argon2-cffi`，自带随机盐），
+  校验用 `PasswordHasher.verify`，不自己实现比较逻辑。从未设置过口令的账号写哨兵值 `"!"`
+  ——它在任何输入下都不可能验证通过（迁移期为已存在的库自动创建的管理员账号就是该状态，
+  需 `--reset-password` 激活）。
+- **登录与 Token**：`POST /api/auth/login` 校验通过后签发 **JWT（HS256，PyJWT）**，载荷只有
+  `sub`（user_id）、`iat`、`exp`（`AUTH_TOKEN_TTL_MINUTES`，默认 720 分钟），**不装权限快照**
+  ——权限每次请求实时查库，因此「改权限 / 移除成员」立即生效、无需重新登录。
+  登录失败（用户名不存在、口令错、账号停用）统一返回同一条 401 文案，不泄露账号是否存在。
+- **密钥强度**：`DEBUG=false` 时若 `AUTH_SECRET_KEY` 仍是默认值或短于 32 字节，应用
+  **拒绝启动**（`verify_production_secret`）——短 HMAC 密钥可被离线爆破，属于启动期就该炸的错误。
+- **身份注入**：`IdentityContextMiddleware`（纯 ASGI，不用 Starlette 的请求对象）解析
+  `Authorization: Bearer`，把 `user_id` 写进 `contextvars`；日志格式统一带 `user=`（`core/context.py`
+  的 `log_user()`），**不靠每个函数手动传参**。
+- **授权（ACL）**：`knowledge_bases.owner_id`（NOT NULL、FK `RESTRICT`、带索引）+ `kb_members
+  (kb_id, user_id, permission)`。三级：`owner` > `write`（含 `read`）> `read`；无记录即无权。
+- **HTTP 语义**：未登录 / Token 过期、篡改、账号已停用 → **401**（带 `WWW-Authenticate: Bearer`）；
+  已登录但无权访问目标 kb → **403**；kb 不存在 → **404**；会话 ID 属于别的库同样 404（不泄露存在性）。
+  `GET /api/kb` 只返回 `accessible_kb_ids()` 的结果。
+- **检索边界**：权限判定发生在进入服务层**之前**——每个涉及 kb 的路由都挂 `ensure_kb_access` 守卫；
   不允许在 `services/rag.py` 里用「检索后再过滤掉不可见的 kb」来补。
-- **免鉴权白名单**：`/api/system/health` 必须免鉴权且永不 5xx（监控与探活用）；
-  `/docs` 与 `/openapi.json` 在非生产环境可放开，生产默认关闭（`ENABLE_DOCS`）。
+- **免鉴权白名单**：只有 `POST /api/auth/login` 与 `GET /api/system/health`（后者必须免鉴权且永不 5xx）；
+  `/docs`、`/redoc`、`/openapi.json` 由 `ENABLE_DOCS` 控制，生产建议关闭。
+
+**已知取舍**（写明是为了不被当成 bug）：Token 存 localStorage（无 logout 接口，客户端丢弃即可）；
+停用账号（`is_active=false`）会让已签发 Token 立即失效，但**改口令不会**——JWT 无状态，
+短 TTL 是泄漏后的唯一收敛手段（README「配置说明」）。
 
 ## 4. 关系库 vs 向量库：各存什么、怎么对账
 
@@ -284,8 +311,9 @@ class TaskQueue(Protocol):
 | 知识库 embedding 与当前配置不一致 | `EmbeddingIdentityMismatch` | 409/503 + 「切回原模型或跑 `scripts/reindex_kb.py`」 |
 | provider 的 `/models` 不含当前模型但该端点不权威 | 只告警 | `/api/system/health` 的 `llm.ok=true` 且 `llm.warning` 有值 |
 | provider 的 `/models` 权威且不含当前模型 | 判为不可用 | `llm.ok=false` + 错误里列出可选模型名 |
-| 未登录 / Token 过期或篡改（Phase 3） | 401（不带内部错误细节） | 「请重新登录」；前端跳登录页 |
-| 已登录但无该知识库权限（Phase 3） | 403 | 「无权访问该知识库」；列表接口不返回无权限的库 |
+| 未登录 / Token 过期或篡改 / 账号已停用 | 401（不带内部错误细节） | 「请重新登录」；前端跳登录页 |
+| 已登录但无该知识库权限 | 403 | 「无权访问该知识库」；列表接口不返回无权限的库 |
+| 目标 kb / 文档 / 会话不存在或属于其它库 | 404 | 「知识库不存在」等；不区分「无权限」与「不存在」以外的信息 |
 | LangSmith 未配置或不可达 | 降级为本地日志 + 计时 | 无感知，仅启动/首次请求一条 warning |
 | LLM 生成中途失败（流式已发头） | 发一个 `event: error` 帧并结束 | 前端展示错误，不静默截断 |
 

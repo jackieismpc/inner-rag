@@ -50,7 +50,7 @@
   写代码前先想清最优实现，注释写「为什么」而非「是什么」（细则见 `AGENTS.md`）。
 - **变更留痕**：每次 push 前必须更新 `CHANGELOG.md`（记录目的 / 方案 / 效果），细则见第 8 节与 `AGENTS.md`。
 
-## 2. 现状基线（Phase 0–2.1 已交付）
+## 2. 现状基线（Phase 0–3 已交付）
 
 已经具备（这是后续阶段的起点，不要重复造）：
 
@@ -62,7 +62,7 @@
 | 缓存 | 进程内 LRU（query cache 按 kb 精确失效 + embedding cache 按 `provider:model` 隔离） | 多 worker 下失效；没有 Redis 等外部后端 |
 | 后台任务 | FastAPI `BackgroundTasks` 解析入库 | 无队列、无重试、无进度、无并发上限 |
 | 可观测 | loguru 文本日志（`logs/app.log`）、检索日志与 Prompt 统计（`/api/system/stats`） | 无 request_id、无结构化字段、无 tracing、无指标端点；跨步骤耗时无法归因 |
-| 测试 | 89 个离线用例（含 `benchmark/` 的 15 个指标/数据集单测）+ 5 个 `-m live` 联网用例；离线用例强制 mock provider | 无 LLM-as-judge、无真实小库基线；`docs/samples/acceptance.txt` 只验证链路通不通 |
+| 测试 | 128 个离线用例（含 `tests/test_auth.py` 的身份 / ACL 用例与 `benchmark/` 的 15 个指标单测）+ 5 个 `-m live` 联网用例；离线用例强制 mock provider | 无 LLM-as-judge、无真实小库基线；`docs/samples/acceptance.txt` 只验证链路通不通 |
 | 评测 | 评测集、离线 fixture、基准脚本已入库（`docs/datasets/dragon_king/`、`benchmark/`） | 真实小库/全库评测依赖本地 PDF 与 provider Key，尚未跑出正式基线 |
 | 交付 | Dockerfile + compose（PostgreSQL 16 / 后端镜像）、Alembic、README | 镜像与 PG 路径未实测；无 CI |
 
@@ -125,25 +125,37 @@ flowchart TB
 > 和「向量库统一到 zvec」放在最前面——它们会改变数据模型、检索链路与既有实现，越晚做返工越大。
 > 检索质量调优（rerank / 查询改写）依赖评测基线，属于正确的后置，不提前。
 
-### Phase 3 — 身份与访问控制平面（单租户 + 登录 + 知识库级 ACL）
+### Phase 3 — 身份与访问控制平面（单租户 + 登录 + 知识库级 ACL）| ✅ 已完成
 
 **目标**：让「谁在用、能看哪个知识库」成为系统的一等公民，而不是匿名开放。
 
-**主要改动**
-- 认证：本地账号（用户名 + 密码哈希）登录，签发会话 Token（JWT 或服务端 session）；
-  新增 `AuthMiddleware` / FastAPI 依赖，把 `user_id` 注入请求上下文（contextvar），供服务层与日志使用。
-- 数据模型：新增 `users` 表；`knowledge_bases` 增加 `owner_id`；新增知识库 ACL（授权用户）关联表。
-- 权限：知识库级 ACL（owner + 被授权用户）；`/api/kb`、`/api/doc`、`/api/chat` 全部路由
-  校验「当前用户对目标 kb 是否有权限」；无权限返回 403，未登录返回 401。
-- 检索链路带权限边界：只允许在用户有权限的知识库内检索（本期为 kb 级，不做文档级）。
-- 前端：登录页 + 登录态；知识库列表只显示有权限的库。
-- **范围边界（明确不做）**：多租户、部门隔离、文档级权限、SSO/LDAP、审计合规——留作后续可选。
+**实际交付**（as-built；契约细节见 `docs/architecture.md` 3.8）
+- 认证：`POST /api/auth/login` 用户名 + 口令换 **JWT（HS256，PyJWT）**，载荷只有 `sub` / `iat` / `exp`；
+  口令只存 **argon2id** 哈希（`argon2-cffi`，自带随机盐），未设过口令的账号写哨兵值 `"!"`；
+  `IdentityContextMiddleware`（纯 ASGI）把 `user_id` 注入 `contextvars`，日志统一带 `user=`；
+  `GET /api/auth/me` 供前端刷新后恢复登录态（无 logout 接口）。
+- 数据模型：迁移 `0002_identity_and_kb_acl` 新增 `users` / `kb_members` 两表，并给
+  `knowledge_bases.owner_id` 加 NOT NULL + FK(`RESTRICT`) + 索引；已存在的旧库自动回填到迁移期管理员账号
+  （状态为「未设口令」，需 `--reset-password` 激活），已验证 upgrade / check / downgrade / 重放。
+- 权限：`core/access.py` 定义 `read` / `write` / `owner` 三级与 `accessible_kb_ids()`；
+  `api/deps.py` 把策略映射成 HTTP 语义（未登录 / 过期 / 账号停用 → 401；越权 → 403；不存在 → 404）；
+  `/api/kb` 列表只返回有权限的库；权限不缓存快照，改权限 / 移除成员立即生效。
+- 检索链路带权限边界：所有涉及 kb 的路由先过 `ensure_kb_access` 守卫，服务层不对不可见的 kb 检索；
+  跨库会话 ID 回归修成 404。
+- 前端：登录页 + 路由守卫（默认私有，`/login` 为唯一公开页）+ 按 `my_permission` 渲染；
+  401 统一回登录页；知识库列表 / 详情 / 文档页按权限决定可见操作；SSE 请求同样带 Token。
+- 运维：`scripts/create_user.py`（建号 / 重置口令 / 停用启用 / `--list`，口令交互式输入或 `--password-stdin`）。
+- 加固：`DEBUG=false` 时用默认或短于 32 字节的 `AUTH_SECRET_KEY` **拒绝启动**（`verify_production_secret`）。
+- **范围边界（明确不做）**：多租户、部门隔离、文档级权限、SSO/LDAP、审计合规、注册接口、logout 接口。
 
-**阶段测试**
-- 离线：未登录访问受保护接口 → 401；访问他人 kb → 403；有权可正常读写；密码哈希不可逆；
-  Token 过期 / 篡改被拒；`/api/system/health` 免鉴权且不 5xx。
+**阶段测试**：`tests/test_auth.py`（~13 组，多为参数化路由表）——401 全路由表、`/health` 免鉴权、
+停用账号的 Token 立即失效、登录成功 / 失败 / 停用 / 文案一致、伪造 Token 五类（过期 / 错密钥 / 篡改载荷 /
+`alg=none` / 缺 `exp`）、哈希加盐与 `"!"` 哨兵、弱密钥拒绝启动、跨库 403 路由表（11 条）、
+列表隔离、跨库会话 ID 回归、只读 / 可写成员行为、成员管理仅 `owner`。
 
-**DoD**：两个用户各自只能看到自己的知识库；跨库访问被 403 拦下；未登录被 401 拦下。
+**DoD（已验证）**：两个用户各自只能看到自己的知识库；跨库访问 403；未登录 401；
+`/api/system/health` 免鉴权且不 5xx。验证方式：`./scripts/gates.sh g1` 全绿
+（ruff / mypy 42 文件 / 128 个离线用例 / 迁移 upgrade→check→downgrade→upgrade / 冒烟探活 + openapi / changelog 与密钥自检）。
 
 ### Phase 4 — 向量库统一到 zvec
 
@@ -370,8 +382,12 @@ uv run pytest -m live -q
 
 # 真实端到端（Chat 走 DeepSeek、Embedding 走 OpenRouter 的默认组合即可）
 uv run uvicorn inner_rag.main:app --reload --port 8010
-curl --noproxy '*' -s localhost:8010/api/system/health
-# 上传 docs/samples/acceptance.txt → 提问 → 检查 sources 与 done 的答案确实来自文档
+curl --noproxy '*' -s localhost:8010/api/system/health          # 免鉴权
+TOKEN=$(curl -s -X POST localhost:8010/api/auth/login -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"admin"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["data"]["access_token"])')
+# 带 -H "Authorization: Bearer $TOKEN"：上传 docs/samples/acceptance.txt → 提问 →
+# 检查 sources 与 done 的答案确实来自文档；再用另一个账号访问同一个 kb，应得 403
 ```
 
 Phase 6 起，G2 还必须包含**龙族小库**上的问答验收（见 `docs/evaluation.md` 的执行三级）。
@@ -391,7 +407,7 @@ README 基准表对比：
 
 | 里程碑 | 内容 | 完成证据 |
 | --- | --- | --- |
-| M0 权限 | Phase 3 | 两个用户互相看不到对方知识库；跨库 403、未登录 401 的用例 |
+| M0 权限 | Phase 3 ✅ | 两个用户互相看不到对方知识库；跨库 403、未登录 401 的用例（`tests/test_auth.py`） |
 | M1 向量库统一 | Phase 4 | `VECTOR_STORE=zvec` 跑通全链路 + 契约测试全绿 + 迁移后指标不回归 |
 | M2 可观测 | Phase 5 | LangSmith trace 链接 + 一次请求的 request_id 日志串联 + `metrics` 输出 |
 | M3 可评估 | Phase 6 | `docs/reports/eval-*.md` 报告 + 基线表 + 评测脚本离线单测 |

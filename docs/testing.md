@@ -17,12 +17,14 @@
 
 不设用例数量目标；README 里的用例数只是**现状快照**，不是 KPI。
 
-现状（Phase 0–2.1，用例数是快照不是目标）：
+现状（Phase 0–3，用例数是快照不是目标）：
 
 - `pyproject.toml` 里 `addopts = "-m 'not live'"`，即**默认只跑离线用例**；
 - `markers` 已注册 `live`；`live` 用例必须显式 `-m live` 才执行；
 - `tests/conftest.py` 强制把 `LLM_PROVIDER` / `EMBEDDING_PROVIDER` 钉成 `mock` 并设置
   `EMBEDDING_MAX_INPUT_CHARS`，保证**不受开发者本机 `.env` 影响**；
+- 用例数快照：**128 个离线用例**（Phase 3 后），其中登录 / 鉴权 / ACL 在 `tests/test_auth.py`
+  （多为参数化路由表，例如「11 条受保护路由全部 401」是一条用例的参数化而不是 11 条用例）；
 - 测试库与向量库都用临时目录，不写 `./data`；跑完即清理；
 - `benchmark/` 的指标与评测集校验也有离线用例（`tests/test_benchmark_metrics.py`）；
   `--mode fixtures` 的评测自检不在 pytest 里，要单独跑（见第 6 节）。
@@ -31,7 +33,8 @@
 
 ```
 tests/
-├── conftest.py              # 环境钉死 + 公共 fixture（临时库、client、假 provider）
+├── conftest.py              # 环境钉死 + 公共 fixture（临时库、已登录 client、建号/登录辅助、假 provider）
+├── test_auth.py             # L2：登录 / 鉴权 / ACL（401·403 路由表、伪造 Token、成员权限）
 ├── test_api.py              # L2：kb / document / chat / system 接口
 ├── test_cache.py            # L1/L2：query 与 embedding 缓存语义与失效
 ├── test_parser.py           # L1/L2：解析与 OCR 后端行为
@@ -60,6 +63,10 @@ tests/
   绝不共用 `./data`；
 - **假 provider**：`LLM_PROVIDER=mock` / `EMBEDDING_PROVIDER=mock`（确定性哈希词袋向量），
   断言只依赖「词面相似」这种可控特性；
+- **账号与登录**：`conftest.py` 暴露 `create_user` / `set_user_active` / `login` / `bearer` 与
+  `TEST_PASSWORD`；`client` 与 `other_client` 是「甲 / 乙」两个已登录用户（后者专用来断言跨库 403
+  与列表隔离），`anonymous_client` 不带 Token。账号走与 `scripts/create_user.py` 同一条代码路径创建
+  ——系统没有注册接口，测试也不该绕过鉴权塞数据；
 - **假时钟 / 假网络**：需要 TTL 的缓存用例用 monkeypatch 时间，不用 `sleep`；
   任何 HTTP 调用（Phase 5 的 tracing 上报、Phase 9 的 VLM）都要能 monkeypatch；
 - **严禁真实 Key**：测试进程里不许出现真实 Key；`live` 用例从环境变量读，缺失时 `skip`
@@ -95,6 +102,7 @@ uv run python -m benchmark.run_bench --mode fixtures   # 评测自检（离线�
 # 阶段收尾（G1）
 uv run mypy
 uv run pytest -q                    # 离线全量（含 benchmark 单测）
+uv run pytest -q tests/test_auth.py # 只看登录 / 鉴权 / ACL
 uv run alembic upgrade head && uv run alembic check
 
 # 真实链路（G2）

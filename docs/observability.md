@@ -65,6 +65,7 @@ ingest.document
 | 键 | 取值 | 用途 |
 | --- | --- | --- |
 | `request_id` | 透传或新生成的 UUID | 与日志串联的唯一钥匙 |
+| `user_id` | 整数（字符串化） | 「谁问的」；与日志的 `user=` 对齐（Phase 3 起可用） |
 | `session_id` | `conv_id` | LangSmith 的 thread，把多轮问答串成一个会话 |
 | `kb_id` / `doc_id` | 整数（字符串化） | 按知识库/文档筛 trace |
 | `provider` / `model` | 如 `deepseek` / `deepseek-flash` | 按后端对比延迟与成本 |
@@ -91,6 +92,10 @@ tags：`["env:<env>", "provider:<provider>", "kind:chat|ingest|eval"]`。
 
 ### 3.1 request_id 中间件
 
+> Phase 3 已有 `IdentityContextMiddleware`（纯 ASGI）解析 Token、把 `user_id` 写进 `contextvars`，
+> 日志格式已统一带 `user=`（未登录 / Token 无效时为 `-`）；权限判定本身不在此层（见 `docs/architecture.md` 3.8）。
+> 下面是 Phase 5 在此基础上补的 request_id。
+
 `RequestIdMiddleware`：
 
 - 读 `X-Request-ID`（存在则透传，便于网关串联），否则生成 UUID4；
@@ -100,9 +105,9 @@ tags：`["env:<env>", "provider:<provider>", "kind:chat|ingest|eval"]`。
 访问日志字段（每个请求一行，`text` 与 `json` 两种格式内容一致）：
 
 ```json
-{"ts":"2026-09-28T09:20:01.123Z","level":"INFO","event":"http_access","request_id":"…",
+ {"ts":"2026-09-28T09:20:01.123Z","level":"INFO","event":"http_access","request_id":"…",
  "method":"POST","path":"/api/chat/send","status":200,"duration_ms":1284.5,
- "kb_id":1,"client":"127.0.0.1"}
+ "user":3,"kb_id":1,"client":"127.0.0.1"}
 ```
 
 ### 3.2 业务日志
@@ -118,7 +123,7 @@ tags：`["env:<env>", "provider:<provider>", "kind:chat|ingest|eval"]`。
 
 - 日志消息里的数值（耗时、条数、分数）在 JSON 模式下必须是**数字类型**，不要塞进字符串；
 - 异常日志必须带 `request_id`、`path`、异常类型与堆栈；`ProviderError` 额外带 `provider`/`model`；
-- 每条日志都要能回答「谁（request_id / kb）在什么阶段（event）花了多久（duration_ms）」；
+- 每条日志都要能回答「谁（user / request_id / kb）在什么阶段（event）花了多久（duration_ms）」；
 - 不许打印密钥、完整 Prompt（除非 `LOG_PROMPT=true`）与用户隐私字段。
 
 ## 4. 指标
