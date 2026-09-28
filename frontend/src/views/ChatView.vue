@@ -166,7 +166,7 @@
 <script setup>
 import { ref, nextTick, onMounted, reactive } from 'vue'
 import { useRoute } from 'vue-router'
-import { chatApi, kbApi } from '@/api'
+import { authHeaders, chatApi, handleUnauthorized, kbApi } from '@/api'
 import { useAppStore } from '@/stores/app'
 import { marked } from 'marked'
 
@@ -248,12 +248,22 @@ async function sendMessage() {
   streamingMsg.value = aiMsg
 
   try {
-    // SSE streaming
+    // SSE streaming（必须自己带 token：原生 fetch 不走 axios 拦截器）
     const res = await fetch('/api/chat/stream', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
       body: JSON.stringify({ kb_id: id, conv_id: activeConvId.value, question: q }),
     })
+
+    if (res.status === 401) {
+      handleUnauthorized()
+      throw new Error('登录已过期，请重新登录')
+    }
+    if (!res.ok || !res.body) {
+      // 403（无该库权限）/404（库不存在）等：错误体是 JSON，取后端的 detail 文案
+      const body = await res.json().catch(() => null)
+      throw new Error(body?.detail || `请求失败（HTTP ${res.status}）`)
+    }
 
     const reader = res.body.getReader()
     const decoder = new TextDecoder()

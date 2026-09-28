@@ -1,5 +1,8 @@
 <template>
-  <div class="flex h-screen overflow-hidden bg-gray-50">
+  <!-- 登录页不套应用外壳：未登录时不该看到侧边栏与系统状态 -->
+  <router-view v-if="isPublicPage" />
+
+  <div v-else class="flex h-screen overflow-hidden bg-gray-50">
     <!-- Sidebar -->
     <aside class="w-56 flex-shrink-0 flex flex-col bg-white border-r border-gray-100">
       <!-- Logo -->
@@ -22,6 +25,26 @@
         </router-link>
       </nav>
 
+      <!-- 当前登录用户 -->
+      <div class="p-3 border-t border-gray-100">
+        <div class="flex items-center gap-2 px-2 py-1">
+          <span class="w-6 h-6 rounded-full bg-primary-100 text-primary-700 flex items-center justify-center text-xs font-medium flex-shrink-0">
+            {{ initial }}
+          </span>
+          <div class="flex-1 min-w-0">
+            <p class="text-xs font-medium text-gray-800 truncate">
+              {{ appStore.user?.display_name || appStore.user?.username || '未登录' }}
+            </p>
+            <p class="text-[11px] text-gray-400 truncate">{{ appStore.user?.username }}</p>
+          </div>
+          <button class="btn-ghost p-1.5" title="退出登录" @click="onLogout">
+            <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
       <!-- System status -->
       <div class="p-3 border-t border-gray-100">
         <div class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-gray-500">
@@ -42,28 +65,35 @@
     <main class="flex-1 overflow-hidden flex flex-col min-w-0">
       <router-view />
     </main>
-
-    <!-- Toast -->
-    <transition name="fade">
-      <div v-if="appStore.toast" class="fixed bottom-6 right-6 z-50 flex items-center gap-2 px-4 py-3 rounded-xl shadow-lg text-sm font-medium"
-        :class="{
-          'bg-gray-900 text-white': appStore.toast.type === 'info',
-          'bg-green-600 text-white': appStore.toast.type === 'success',
-          'bg-red-600 text-white':   appStore.toast.type === 'error',
-        }">
-        <span>{{ appStore.toast.msg }}</span>
-      </div>
-    </transition>
   </div>
+
+  <!-- Toast -->
+  <transition name="fade">
+    <div v-if="appStore.toast" class="fixed bottom-6 right-6 z-50 flex items-center gap-2 px-4 py-3 rounded-xl shadow-lg text-sm font-medium"
+      :class="{
+        'bg-gray-900 text-white': appStore.toast.type === 'info',
+        'bg-green-600 text-white': appStore.toast.type === 'success',
+        'bg-red-600 text-white':   appStore.toast.type === 'error',
+      }">
+      <span>{{ appStore.toast.msg }}</span>
+    </div>
+  </transition>
 </template>
 
 <script setup>
 import { ref, computed, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { useAppStore } from '@/stores/app'
 import { sysApi } from '@/api'
 
 const appStore = useAppStore()
+const route = useRoute()
+const router = useRouter()
 const health = ref(null)
+
+// 登录页不套应用外壳；系统状态接口（/api/system/health）本身免鉴权，所以登录页也能探活
+const isPublicPage = computed(() => route.meta.public === true)
+const initial = computed(() => (appStore.user?.username || '?').slice(0, 1).toUpperCase())
 
 // /api/system/health 返回 { llm: { provider, model, ok, error }, embedding: {...} }
 const llmLabel = computed(() => {
@@ -72,7 +102,15 @@ const llmLabel = computed(() => {
   return llm.ok ? `${llm.provider} 已连接` : `${llm.provider} 未连接`
 })
 
+function onLogout() {
+  appStore.logout()
+  appStore.showToast('已退出登录')
+  router.replace('/login')
+}
+
 onMounted(async () => {
+  // 刷新页面后用 token 换回登录用户；token 失效会被 401 拦截送回登录页
+  await appStore.restoreSession()
   try { health.value = await sysApi.health() } catch {}
   setInterval(async () => {
     try { health.value = await sysApi.health() } catch {}

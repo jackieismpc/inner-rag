@@ -47,7 +47,9 @@
             <div class="w-10 h-10 rounded-xl bg-primary-50 flex items-center justify-center text-xl flex-shrink-0">
               {{ kb.icon }}
             </div>
-            <div class="opacity-0 group-hover:opacity-100 transition-opacity flex gap-1" @click.stop>
+            <!-- 改设置 / 删库是拥有者专属：成员看到按钮也只会在后端拿到 403 -->
+            <div v-if="kb.my_permission === 'owner'"
+              class="opacity-0 group-hover:opacity-100 transition-opacity flex gap-1" @click.stop>
               <button class="btn-ghost p-1.5" @click.stop="openEdit(kb)">
                 <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                   <path stroke-linecap="round" stroke-linejoin="round" d="M15.232 5.232l3.536 3.536m-2.036-5.036a2.5 2.5 0 113.536 3.536L6.5 21.036H3v-3.572L16.732 3.732z"/>
@@ -66,9 +68,15 @@
 
           <div class="mt-3 pt-3 border-t border-gray-50 flex items-center justify-between">
             <span class="text-xs text-gray-400">{{ kb.doc_count }} 篇文档</span>
-            <span :class="kb.status === 'active' ? 'badge-green' : 'badge-gray'">
-              {{ kb.status === 'active' ? '正常' : '停用' }}
-            </span>
+            <div class="flex items-center gap-1">
+              <span v-if="kb.my_permission !== 'owner'"
+                :class="kb.my_permission === 'write' ? 'badge-blue' : 'badge-gray'">
+                {{ kb.my_permission === 'write' ? '可写' : '只读' }}
+              </span>
+              <span :class="kb.status === 'active' ? 'badge-green' : 'badge-gray'">
+                {{ kb.status === 'active' ? '正常' : '停用' }}
+              </span>
+            </div>
           </div>
         </div>
       </div>

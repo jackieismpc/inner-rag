@@ -11,14 +11,16 @@
         <h1 class="text-base font-semibold text-gray-900">文档管理</h1>
         <p class="text-xs text-gray-500">上传和管理知识库文档</p>
       </div>
-      <div class="flex gap-2">
-        <button class="btn-ghost text-xs" @click="showPathModal = true">
+      <div class="flex items-center gap-2">
+        <!-- 上传/导入/删除/重新解析都是写权限：只读成员看不到入口（后端也会拦） -->
+        <span v-if="kb && !canWrite" class="badge-gray">只读权限</span>
+        <button v-if="canWrite" class="btn-ghost text-xs" @click="showPathModal = true">
           <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
             <path stroke-linecap="round" stroke-linejoin="round" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"/>
           </svg>
           本地目录导入
         </button>
-        <button class="btn-primary text-xs" @click="triggerUpload">
+        <button v-if="canWrite" class="btn-primary text-xs" @click="triggerUpload">
           <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
             <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/>
           </svg>
@@ -114,7 +116,7 @@
               </td>
               <td class="px-4 py-3 text-xs text-gray-400">{{ formatDate(doc.created_at) }}</td>
               <td class="px-4 py-3">
-                <div class="flex gap-1 justify-end">
+                <div v-if="canWrite" class="flex gap-1 justify-end">
                   <button v-if="doc.status === 'failed'" class="btn-ghost p-1" title="重新处理"
                     @click="reprocess(doc)">
                     <svg class="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -171,9 +173,9 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRoute } from 'vue-router'
-import { docApi } from '@/api'
+import { docApi, kbApi } from '@/api'
 import { useAppStore } from '@/stores/app'
 import Modal from '@/components/Modal.vue'
 import Spinner from '@/components/Spinner.vue'
@@ -181,6 +183,10 @@ import Spinner from '@/components/Spinner.vue'
 const route = useRoute()
 const appStore = useAppStore()
 const id = parseInt(route.params.id)
+
+// 权限取自知识库详情（my_permission），只读成员不展示写操作入口
+const kb = ref(null)
+const canWrite = computed(() => ['owner', 'write'].includes(kb.value?.my_permission))
 
 const docs = ref([])
 const loading = ref(false)
@@ -259,6 +265,11 @@ async function reprocess(doc) {
 
 // Auto-refresh for processing docs
 let refreshTimer = null
-onMounted(() => { load(); refreshTimer = setInterval(load, 8000) })
+onMounted(async () => {
+  try { kb.value = (await kbApi.get(id)).data }
+  catch (e) { appStore.showToast(e.message, 'error') }
+  load()
+  refreshTimer = setInterval(load, 8000)
+})
 onUnmounted(() => clearInterval(refreshTimer))
 </script>
