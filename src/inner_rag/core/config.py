@@ -19,7 +19,15 @@ class Settings(BaseSettings):
     APP_NAME: str = "inner-rag Knowledge Base"
     APP_VERSION: str = "0.3.0"
     DEBUG: bool = True
-    SECRET_KEY: str = "change-me-in-production"
+    # /docs /redoc /openapi.json：只在非生产环境开放，避免对外暴露完整接口清单
+    ENABLE_DOCS: bool = True
+
+    # ── Auth（本地账号 + JWT）───────────────────────────────────────────
+    # 生产（DEBUG=false）必须改成 ≥32 字节的随机密钥，否则拒绝启动（见 core/security.py）；
+    # 账号由 `uv run scripts/create_user.py` 创建，系统不提供注册接口。
+    AUTH_SECRET_KEY: str = "dev-only-insecure-secret-change-me-in-production"
+    # 会话 Token 有效期（分钟）。JWT 无状态、无法单独撤销，短 TTL 是唯一的收敛手段。
+    AUTH_TOKEN_TTL_MINUTES: int = 720
 
     # ── Server ─────────────────────────────────────────────────────────
     HOST: str = "0.0.0.0"
