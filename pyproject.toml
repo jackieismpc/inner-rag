@@ -1,0 +1,96 @@
+[project]
+name = "inner-rag"
+version = "0.2.0"
+description = "Multi-provider RAG knowledge base — FastAPI + LangChain 1.x + ChromaDB (Ollama / OpenRouter / DeepSeek)"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["rag", "langchain", "fastapi", "chromadb", "knowledge-base"]
+classifiers = [
+  "Private :: Do Not Upload",
+  "Programming Language :: Python :: 3.13",
+]
+
+dependencies = [
+  # Web framework
+  "fastapi>=0.141.1",
+  "uvicorn[standard]>=0.54.0",
+  "python-multipart>=0.0.20",
+  # LangChain 1.x — core + the partner packages actually used by the code.
+  # The `langchain` meta package (create_agent / middleware) is not needed yet.
+  "langchain-core>=1.6.5",
+  "langchain-text-splitters>=1.1.2",
+  "langchain-ollama>=1.1.0",
+  "langchain-chroma>=1.1.0",
+  # Vector store
+  "chromadb>=1.5.9",
+  # Database
+  "sqlalchemy>=2.1.1",
+  "psycopg[binary]>=3.2.10",
+  "alembic>=1.16.6",
+  # Document parsing
+  "pypdf>=6.19.0",
+  "python-docx>=1.2.0",
+  "docx2txt>=0.9",
+  "openpyxl>=3.1.5",
+  "xlrd>=2.0.1",
+  "pillow>=11.3.0",
+  "pymupdf>=1.26.6",
+  "chardet>=5.2.0",
+  # Utilities
+  "pydantic>=2.13.5",
+  "pydantic-settings>=2.15.0",
+  "httpx>=0.28.1",
+  "loguru>=0.7.3",
+]
+
+[project.optional-dependencies]
+# Local OCR is opt-in; the OCR backend is pluggable (see inner_rag/services/ocr.py).
+ocr-paddle = ["paddleocr>=3.7.0", "paddlepaddle>=3.3.1"]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4.2",
+  "pytest-asyncio>=1.2.0",
+  "ruff>=0.14.2",
+  "mypy>=1.18.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inner_rag"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+  "E501",   # 行长由 formatter 负责
+  "RUF001", # 中文全角标点在注释/字符串中是刻意的
+  "RUF002",
+  "RUF003",
+  "B008",    # FastAPI 的标准写法就是 Depends()/File()/Query() 作为默认值
+  "RUF012", # 类级可变默认值在本项目中只在测试/常量场景出现
+  "UP042",  # str + Enum 兼容 SQLAlchemy 的 values_callable 写法
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["inner_rag"]
+
+[tool.mypy]
+python_version = "3.13"
+files = ["src/inner_rag"]
+# 文档解析类库（docx2txt / openpyxl / xlrd / paddleocr）没有 py.typed，也不维护 stub
+ignore_missing_imports = true
