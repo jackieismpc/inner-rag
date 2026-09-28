@@ -30,7 +30,7 @@
   `similarity` / `mmr` / `hybrid` 三策略检索与**真实相关度**、SSE 流式问答、引用溯源、会话历史
 - Alembic 迁移（SQLite 与 PostgreSQL 通吃）、`AUTO_CREATE_TABLES=false`、SQLite 开启 WAL 与
   `foreign_keys=ON`
-- 68 个完全离线的 pytest 用例（fake / mock provider，无网络）+ 4 个 `-m live` 真实 API 用例（默认 deselect）、
+- 74 个完全离线的 pytest 用例（fake / mock provider，无网络）+ 5 个 `-m live` 真实 API 用例（默认 deselect）、
   `ruff` 与 `mypy` 干净
 - 前端（Vue 3 + Vite）与后端端口 8010 打通，SSE 手写解析
 
@@ -166,7 +166,8 @@ curl --noproxy '*' -N -X POST localhost:8010/api/chat/stream \
 - **mock provider 契约测试**：`/api/chat/stream`、`/api/chat/send`、上传入库全链路跑在 mock 上
 - **降级测试**：缺 key 时 API 返回可读错误（不是 500 堆栈）
 - **live 冒烟（手工、默认跳过）**：新增 `pytest -m live`（`addopts = "-m 'not live'"`），需要 `.env`
-  里的真实 key；跑之前确认 embedding 缓存命中（同一文本不重复调用），控制费用
+  里的真实 key（OpenRouter 用于 chat / embedding，DeepSeek 单独一条 chat + health 用例）；跑之前确认
+  embedding 缓存命中（同一文本不重复调用），控制费用
 
 DoD：`.env` 里填 `LLM_PROVIDER=openrouter` + `OPENROUTER_API_KEY` 后，`/api/system/health` 全绿，
 上传 → 提问 → 引用来源全链路走通；README 更新 provider 配置表与「DeepSeek 无 embeddings」说明。
@@ -180,6 +181,12 @@ DoD：`.env` 里填 `LLM_PROVIDER=openrouter` + `OPENROUTER_API_KEY` 后，`/api
   provider 配置错误在 API 层统一映射为 **503**，且文案指向该改的变量
 - `LangChain` 侧统一改用 `langchain-openai` 接管全部云端 OpenAI 兼容端点，Ollama 仍用
   `langchain-ollama`；不再手写 `httpx` 探活（`/models` 发现逻辑收进 `factory._discover_models`）
+- DeepSeek 改用官方集成 `langchain-deepseek`（`ChatDeepSeek`，字段名是 `max_tokens` 而非
+  `max_completion_tokens`，并支持 `LLM_REASONING_EFFORT`），默认模型名同步官方文档改为
+  `deepseek-flash`（旧别名 `deepseek-chat` 已从 `/models` 下架但仍可调用）
+- 新增 `ProviderSpec.model_list_authoritative`：DeepSeek 这类「`/models` 只列主推模型」的
+  provider 上，模型名不在列表里降级为 `llm.warning`（不把 `status` 拖成 `degraded`）；可借模型的
+  provider（ollama / openrouter / openai）仍然判为配置错误，并在 `llm.error` 里列出当前可选模型名
 
 ### Phase 3 — OCR 迁移到视觉大模型（VLM）
 
@@ -255,6 +262,7 @@ DoD：新机器按 README 从零跑通，且 CI 绿。
 | 测试全用假 provider | 真实 API 行为差异漏测 | 每阶段一次 G2 + `-m live` 用例覆盖真实调用 |
 | 免费/小上下文 embedding 模型 | 输入超上下文（如 512 token）、上游可能留存数据训练 | 用 `EMBEDDING_MAX_INPUT_CHARS` 显式截断（可配合调小 `CHUNK_SIZE`）；有合规要求时换付费模型；换 embedding 模型后必须重建索引 |
 | provider 配置写错（错名 / 缺 key / DeepSeek 当 embedding） | 问答骤报 503 | `/api/system/providers` 与 `/health` 的 `llm.error` / `embedding.error` 直接给出变量名与可选值；`.env.example` 与 README 同步说明 |
+| 上游模型更名 / 下架（如 `deepseek-chat` 消失） | 健康检查误报 unavailable，或调用 400 | 模型名以官方文档为准并集中写在 `.env`；`/models` 不完整的 provider 只给 `llm.warning`，真不可用时错误文案会列出当前可选模型名 |
 | 迁移漂移（模型改了没生成 revision） | 部署时炸 | G1 固定跑 `alembic check`，新增字段必须带 revision |
 
 ## 8. 进度记录
@@ -264,8 +272,10 @@ DoD：新机器按 README 从零跑通，且 CI 绿。
 - **Phase 1.5** ✅ 开发默认 SQLite（WAL + 外键 + 等锁超时）、密钥外置到 `.env`、本路线文档
 - **Phase 2** ✅ `providers/` 抽象层（`specs` / `chat` / `embeddings` / `factory`）：Chat 与 Embedding
   独立选型（ollama / openrouter / deepseek / openai / mock）、`ProviderError` → 503、`/api/system/providers`、
-  `embedding_key` 改为 `provider:model`、模型实例缓存；68 个离线用例 + 4 个 `-m live` 用例；
+  `embedding_key` 改为 `provider:model`、模型实例缓存；74 个离线用例 + 5 个 `-m live` 用例；
   G1 五步全绿（ruff / mypy / pytest / 迁移四步 / 冒烟启动 + 密钥扫描）
+- **Phase 2.1** ✅ DeepSeek 路线对齐官方文档：`langchain-deepseek` 官方集成、默认模型 `deepseek-flash`、
+  `LLM_REASONING_EFFORT`、`/models` 不完整时只告警不误报 degraded
 - **Phase 3** 待开始（OCR 迁移到视觉大模型）
 
 ## 9. 已修复的关键缺陷（工程记录）

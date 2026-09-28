@@ -19,7 +19,7 @@
 3. **好部署**：`uv sync` + 一次 `alembic upgrade head` 就能跑起来；开发默认 SQLite 单文件、零外部依赖，
    部署时只改 `DATABASE_URL` 即可切到 PostgreSQL，另附 Dockerfile 与 docker compose。
 4. **工程化可用**：Alembic 迁移、CORS 白名单、文件名与导入路径校验、密钥只从 `.env` 读取、
-   检索质量可观测（真实相关度、缓存命中率、空召回率、平均延迟）、68 个离线用例 + 可选的真实 API 联网验收。
+   检索质量可观测（真实相关度、缓存命中率、空召回率、平均延迟）、74 个离线用例 + 可选的真实 API 联网验收。
 
 ## 特性
 
@@ -37,7 +37,7 @@
   按知识库精确失效）、批量嵌入 + 信号量限流、模型实例在工厂内复用
 - **可观测性**：检索日志、Prompt 日志、缓存命中率 / 空召回率 / 平均延迟统计
 - **工程化**：uv 锁依赖、Alembic 迁移、CORS 白名单、文件名与导入路径安全校验、
-  ruff + mypy 检查、68 个离线 pytest 用例（另有可选的真实 API 联网验收）、Dockerfile + docker compose
+  ruff + mypy 检查、74 个离线 pytest 用例（另有可选的真实 API 联网验收）、Dockerfile + docker compose
 
 ## 架构
 
@@ -78,7 +78,7 @@ flowchart LR
 | --- | --- |
 | 语言 / 包管理 | Python 3.13（uv 管理）、`uv.lock` 锁定依赖 |
 | Web 框架 | FastAPI 0.141+、Uvicorn 0.54+、SSE 流式响应 |
-| LLM 编排 | LangChain 1.x（`langchain-core` 1.6+、`langchain-text-splitters`）+ `langchain-ollama`（本地）/ `langchain-openai`（OpenAI 兼容云端） |
+| LLM 编排 | LangChain 1.x（`langchain-core` 1.6+、`langchain-text-splitters`）+ `langchain-ollama`（本地）/ `langchain-openai`（OpenAI 兼容云端）/ `langchain-deepseek`（DeepSeek 官方集成） |
 | 向量库 | ChromaDB 1.5+（persistent client）/ `langchain-chroma` |
 | 关系库 | SQLite（开发默认）+ PostgreSQL 16（部署可选）+ SQLAlchemy 2.1 + Alembic 1.20 |
 | 文档解析 | pypdf、PyMuPDF、python-docx、docx2txt、openpyxl、xlrd、Pillow、chardet |
@@ -145,13 +145,16 @@ uv run uvicorn inner_rag.main:app --reload --port 8010
 ```bash
 curl -s http://localhost:8010/api/system/health
 # {"status":"healthy","version":"0.3.0",
-#  "llm":{"provider":"deepseek","model":"deepseek-chat","ok":true,...},
+#  "llm":{"provider":"deepseek","model":"deepseek-flash","ok":true,"model_available":true,"error":null,"warning":null},
 #  "embedding":{"provider":"openrouter","model":"liquid/lfm-2.5-embedding-350m:free","ok":true,...}}
 ```
 
 > `status: degraded` 时看 `llm.error` / `embedding.error`：文案会直接指出该去 `.env` 改哪个变量
 > （例如漏填 `OPENROUTER_API_KEY`）或哪个服务连不上。检索与问答会因此失败，但知识库、文档等
 > 管理接口仍可用。
+>
+> `llm.warning` 是「能用但值得注意」的提示，不影响 `status`：例如某家 provider 的 `/models`
+> 不完整（DeepSeek 只列主推模型，旧别名仍可调用），此时不会误报为不可用。
 
 ### 4. 选择模型 Provider
 
@@ -161,7 +164,7 @@ Chat 与 Embedding 是**两个独立开关**，改 `.env` 即可，代码无需�
 | --- | --- | --- |
 | `ollama` | chat + embedding | `http://localhost:11434`，本地、无需 key |
 | `openrouter` | chat + embedding | `https://openrouter.ai/api/v1`，OpenAI 兼容聚合网关，一个 key 用数百个模型 |
-| `deepseek` | **仅 chat** | `https://api.deepseek.com/v1`；官方**没有 embeddings 接口**，写成 `EMBEDDING_PROVIDER=deepseek` 会得到明确报错 |
+| `deepseek` | **仅 chat** | `https://api.deepseek.com/v1`，官方集成（`langchain-deepseek`）；模型名以[官方文档](https://api-docs.deepseek.com)为准（默认 `deepseek-flash`，另有 `deepseek-v4-pro`）；官方**没有 embeddings 接口**，写成 `EMBEDDING_PROVIDER=deepseek` 会得到明确报错 |
 | `openai` | chat + embedding | `https://api.openai.com/v1`；也可指向任何 OpenAI 兼容的自建网关 |
 | `mock` | chat + embedding | 不联网、不需要 key、输出确定性；用于本地演示 / CI / 降级验收（只有词面相似度，不能用来评估检索效果） |
 
@@ -173,6 +176,8 @@ Chat 与 Embedding 是**两个独立开关**，改 `.env` 即可，代码无需�
 # .env —— Chat 走 DeepSeek，Embedding 走 OpenRouter
 LLM_PROVIDER=deepseek
 DEEPSEEK_API_KEY={{DEEPSEEK_API_KEY}}
+DEEPSEEK_CHAT_MODEL=deepseek-flash     # 也可用 deepseek-v4-pro
+# LLM_REASONING_EFFORT=high            # 可选：minimal/low/medium/high（仅 DeepSeek 生效）
 
 EMBEDDING_PROVIDER=openrouter
 OPENROUTER_API_KEY={{OPENROUTER_API_KEY}}
@@ -241,9 +246,10 @@ npm run dev        # http://localhost:3000，通过 Vite 代理访问后端 8010
 | `LLM_PROVIDER` | `ollama` | chat 后端：`ollama` / `openrouter` / `deepseek` / `openai` / `mock` |
 | `EMBEDDING_PROVIDER` | `ollama` | 向量后端：`ollama` / `openrouter` / `openai` / `mock`（DeepSeek 没有 embedding 接口） |
 | `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | 空 | 云端 API 密钥，只写在 `.env`，不要提交 |
-| `*_CHAT_MODEL` / `*_EMBEDDING_MODEL` | 见 `.env.example` | 各 provider 的模型名；换 embedding 模型等于换向量空间，需要重建索引 |
+| `*_CHAT_MODEL` / `*_EMBEDDING_MODEL` | 见 `.env.example` | 各 provider 的模型名；换 embedding 模型等于换向量空间，需要重建索引。DeepSeek 默认 `deepseek-flash`，模型名以官方文档为准 |
 | `EMBEDDING_MAX_INPUT_CHARS` | `0` | 单条输入的字符上限（0 = 不截断）；小上下文模型（如 512 token 的免费 embedding）建议设 `400` |
 | `LLM_TEMPERATURE` / `LLM_MAX_TOKENS` / `LLM_TIMEOUT` / `LLM_MAX_RETRIES` | `0.3` / `2048` / `60` / `2` | 云端调用参数（Ollama 也复用 temperature 与输出长度） |
+| `LLM_REASONING_EFFORT` | 空 | 推理强度 `minimal`/`low`/`medium`/`high`，**仅 DeepSeek 生效**；留空则不发送该字段 |
 | `AUTO_CREATE_TABLES` | `false` | 表结构交给 Alembic；仅测试/一次性库设为 `true` |
 | `OLLAMA_LLM_MODEL` / `OLLAMA_EMBEDDING_MODEL` | `qwen3:14b` / `qwen3-embedding:8b` | 本地 Ollama 的模型名 |
 | `embedding_key`（建库时写入） | `provider:model` | 知识库会锁定建库时的 embedding 身份，换模型后会被校验拦下并提示重建索引 |
@@ -327,7 +333,7 @@ uv run scripts/query_probe.py <kb_id> "查询词" --strategy hybrid --k 8
 uv run ruff check .            # 静态检查
 uv run ruff format .           # 代码格式化
 uv run pytest                  # 全量测试（离线；live 用例默认 deselect）
-uv run pytest -m live -q       # 真实 provider 联网验收（需 OPENROUTER_API_KEY，会产生少量费用）
+uv run pytest -m live -q       # 真实 provider 联网验收（需 OPENROUTER_API_KEY / DEEPSEEK_API_KEY，会产生少量费用）
 uv run pytest -q tests/test_api.py::test_chat_stream_events_and_persistence
 uv run mypy                    # 类型检查（配置见 pyproject.toml 的 [tool.mypy]）
 ```
@@ -381,6 +387,11 @@ A：看响应里的 `llm.error` / `embedding.error`，它能直接定位原因�
 provider 名写错（会列出可选值）、服务连不上（会带上 URL）或模型未拉取。也可用 `GET /api/system/providers`
 看当前选择与 key 状态。
 
+**Q：`/api/system/health` 里 `llm.warning` 提示「/models 未列出 xxx」？**
+A：这不算故障：DeepSeek 的 `/models` 只列当前主推模型（如 `deepseek-flash`），旧模型别名仍可调用。
+配置的模型确实不存在时对话会直接报错，建议按[官方文档](https://api-docs.deepseek.com)更新
+`DEEPSEEK_CHAT_MODEL`；其余 provider 的模型列表可信，模型名写错会被健康检查判为 `degraded`。
+
 **Q：`EMBEDDING_PROVIDER=deepseek` 报错？**
 A：DeepSeek 官方只有 chat completion，没有 embeddings 接口。chat 用 DeepSeek、embedding 用
 OpenRouter / OpenAI / Ollama 是常见组合，两个变量本来就是独立的。
@@ -422,8 +433,8 @@ A：只放 `.env`（已被 `.gitignore` 忽略），`.env.example` 里只留空�
 
 ## 路线图
 
-- **已完成**：多 Provider 抽象层（Chat / Embedding 独立选型、`mock` 降级路径、`/api/system/providers`）、
-  SQLite 优先与密钥外置、Alembic 迁移、Docker 资产
+- **已完成**：多 Provider 抽象层（Chat / Embedding 独立选型、OpenRouter / DeepSeek 官方集成、`mock`
+  降级路径、`/api/system/providers`）、SQLite 优先与密钥外置、Alembic 迁移、Docker 资产
 - **下一步**：OCR 迁移到视觉大模型（扫描件与图片型 PDF）
 - **之后**：检索质量评测集与 Rerank、任务队列与结构化日志、CI 与 PostgreSQL 部署验证
 
