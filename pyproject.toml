@@ -1,6 +1,6 @@
 [project]
 name = "inner-rag"
-version = "0.2.0"
+version = "0.3.0"
 description = "Multi-provider RAG knowledge base — FastAPI + LangChain 1.x + ChromaDB (Ollama / OpenRouter / DeepSeek)"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -22,6 +22,7 @@ dependencies = [
   "langchain-core>=1.6.5",
   "langchain-text-splitters>=1.1.2",
   "langchain-ollama>=1.1.0",
+  "langchain-openai>=1.6.6",
   "langchain-chroma>=1.1.0",
   # Vector store
   "chromadb>=1.5.9",
@@ -68,6 +69,12 @@ packages = ["src/inner_rag"]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 filterwarnings = ["error::DeprecationWarning"]
+# live 用例会真实调用云端 API（花钱、需网络），默认不跑：
+#   跑真实 provider 验收时用 `uv run pytest -m live -q`
+markers = [
+  "live: 需要真实 API Key 与网络的联网测试（默认 deselect，用 -m live 运行）",
+]
+addopts = "-m 'not live'"
 
 [tool.ruff]
 line-length = 100

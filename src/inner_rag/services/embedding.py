@@ -3,6 +3,9 @@
 LangChain 的向量库在内部会同步调用 embed_documents / embed_query，
 业务侧则走异步批量嵌入。两条路径共享同一个 EmbeddingCache，
 因此「入库前预热」与「向量库内部嵌入」不会重复请求模型。
+
+具体用哪家 embedding 后端由 ``inner_rag.providers`` 决定（.env 里的
+EMBEDDING_PROVIDER），本模块不关心是 Ollama 还是云端 API。
 """
 
 from __future__ import annotations
@@ -10,10 +13,10 @@ from __future__ import annotations
 import asyncio
 
 from langchain_core.embeddings import Embeddings
-from langchain_ollama import OllamaEmbeddings
 from loguru import logger
 
 from inner_rag.core.config import settings
+from inner_rag.providers import get_embeddings
 from inner_rag.services.cache import embedding_cache
 
 
@@ -49,21 +52,20 @@ def _finalize(vectors: list[list[float] | None], expected: int) -> list[list[flo
 
 
 class EmbeddingService(Embeddings):
-    """Ollama Embedding 的统一入口（缓存 + 批量 + 并发限制）。"""
+    """Embedding 的统一入口（缓存 + 批量 + 并发限制）。"""
 
     def __init__(self) -> None:
-        self._embeddings: OllamaEmbeddings | None = None
+        self._embeddings: Embeddings | None = None
         self._semaphore: asyncio.Semaphore | None = None
 
     # ── 惰性初始化 ─────────────────────────────────────────────────────
 
     @property
-    def embeddings(self) -> OllamaEmbeddings:
+    def embeddings(self) -> Embeddings:
         if self._embeddings is None:
-            self._embeddings = OllamaEmbeddings(
-                base_url=settings.OLLAMA_BASE_URL,
-                model=settings.OLLAMA_EMBEDDING_MODEL,
-            )
+            # provider 配置非法时（未知 provider / 缺 API Key）
+            # get_embeddings 会抛 ProviderError，由 API 层映射成 503。
+            self._embeddings = get_embeddings()
             logger.info(f"[EMBEDDING] 初始化 {self.identity}")
         return self._embeddings
 

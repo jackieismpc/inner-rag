@@ -1,4 +1,8 @@
-"""RAG 推理服务：检索 -> 组装 Prompt -> 调用 LLM（非流式与 SSE 流式）。"""
+"""RAG 推理服务：检索 -> 组装 Prompt -> 调用 LLM（非流式与 SSE 流式）。
+
+模型实例全部来自 ``inner_rag.providers``：本模块不关心后端是 Ollama、
+OpenRouter、DeepSeek、OpenAI 还是离线 mock。
+"""
 
 from __future__ import annotations
 
@@ -7,14 +11,13 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
-import httpx
 from langchain_core.documents import Document
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_ollama import ChatOllama
-from loguru import logger
 
 from inner_rag.core.config import settings
+from inner_rag.providers import get_chat_model
 from inner_rag.services.cache import query_cache
 from inner_rag.services.retrieval_log import log_prompt, log_retrieval
 from inner_rag.services.vector_store import Strategy, vector_service
@@ -44,18 +47,13 @@ def sse_event(event_type: str, data: Any) -> str:
 
 
 class RAGService:
-    def _get_llm(self) -> ChatOllama:
-        """构建对话模型。
+    def _get_llm(self) -> BaseChatModel:
+        """获取对话模型（由 LLM_PROVIDER 决定，实例在 provider 工厂内复用）。
 
-        LangChain 1.x 的 ChatOllama 不再提供 streaming 初始化参数，
-        流式与否由调用方决定（astream / ainvoke）。
+        配置非法（未知 provider / 缺 API Key）时抛 ProviderError，
+        由 API 层映射成 503 + 可读提示。
         """
-        return ChatOllama(
-            base_url=settings.OLLAMA_BASE_URL,
-            model=settings.OLLAMA_LLM_MODEL,
-            temperature=0.3,
-            num_predict=2048,
-        )
+        return get_chat_model()
 
     def _build_chain(self, history: list[dict[str, Any]]):
         prompt = ChatPromptTemplate.from_messages(self._build_prompt_messages(history))
@@ -204,25 +202,6 @@ class RAGService:
             yield sse_event("token", chunk)
 
         yield sse_event("done", full_answer)
-
-    # ── 健康检查 ───────────────────────────────────────────────────────
-
-    def test_connection(self) -> bool:
-        try:
-            response = httpx.get(f"{settings.OLLAMA_BASE_URL}/api/tags", timeout=5)
-            return response.status_code == 200
-        except Exception as exc:
-            logger.debug(f"[LLM] Ollama 连接失败: {exc}")
-            return False
-
-    def list_models(self) -> list[str]:
-        try:
-            response = httpx.get(f"{settings.OLLAMA_BASE_URL}/api/tags", timeout=5)
-            response.raise_for_status()
-            return [model["name"] for model in response.json().get("models", [])]
-        except Exception as exc:
-            logger.warning(f"[LLM] 获取模型列表失败: {exc}")
-            return []
 
 
 rag_service = RAGService()

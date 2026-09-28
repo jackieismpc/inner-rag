@@ -13,6 +13,7 @@ from loguru import logger
 from inner_rag.api import chat, document, kb, system
 from inner_rag.core.config import settings
 from inner_rag.core.database import init_db
+from inner_rag.providers import ProviderError, chat_health, embedding_health
 from inner_rag.services.retrieval_log import setup_rag_loggers
 
 logger.remove()
@@ -35,8 +36,13 @@ async def lifespan(app: FastAPI):
     logger.info("启动 inner-rag 服务 ...")
     init_db()
     setup_rag_loggers()
-    logger.info(f"LLM 模型: {settings.OLLAMA_LLM_MODEL}")
-    logger.info(f"Embedding 模型: {settings.OLLAMA_EMBEDDING_MODEL}")
+    # 启动时只做配置校验（不发网络请求），配置有问题不阻断启动：
+    # 服务照常起，/api/system/health 会给出可读原因
+    for kind, health in (("LLM", chat_health(probe=False)), ("Embedding", embedding_health())):
+        if health["ok"]:
+            logger.info(f"{kind} provider: {health['provider']} / {health['model']}")
+        else:
+            logger.warning(f"{kind} provider 配置有误: {health['error']}")
     logger.info(f"OCR 后端: {settings.OCR_BACKEND}")
     yield
     logger.info("服务已停止")
@@ -57,6 +63,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(ProviderError)
+async def provider_error_handler(request: Request, exc: ProviderError):
+    """模型后端没配好（未知 provider / 缺 API Key）：503 + 可直接照做的文案。"""
+    logger.error(f"provider 配置错误 {request.method} {request.url.path}: {exc}")
+    return JSONResponse(status_code=503, content={"code": 503, "message": str(exc), "data": None})
 
 
 @app.exception_handler(Exception)

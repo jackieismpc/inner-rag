@@ -26,11 +26,14 @@
       <div class="p-3 border-t border-gray-100">
         <div class="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-gray-500">
           <span class="w-2 h-2 rounded-full flex-shrink-0"
-            :class="health?.ollama ? 'bg-green-400' : 'bg-gray-300'"></span>
-          <span>{{ health?.ollama ? 'Ollama 已连接' : 'Ollama 未连接' }}</span>
+            :class="health?.llm?.ok ? 'bg-green-400' : 'bg-gray-300'"></span>
+          <span :title="health?.llm?.error || ''">{{ llmLabel }}</span>
         </div>
-        <div class="px-2 py-1 text-xs text-gray-400 truncate" v-if="health?.llm_model">
-          {{ health.llm_model }}
+        <div class="px-2 py-1 text-xs text-gray-400 truncate" v-if="health?.llm?.model">
+          {{ health.llm.model }}
+        </div>
+        <div class="px-2 py-1 text-xs text-gray-400 truncate" v-if="health?.embedding?.model">
+          embed · {{ health.embedding.model }}
         </div>
       </div>
     </aside>
@@ -55,12 +58,19 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useAppStore } from '@/stores/app'
 import { sysApi } from '@/api'
 
 const appStore = useAppStore()
 const health = ref(null)
+
+// /api/system/health 返回 { llm: { provider, model, ok, error }, embedding: {...} }
+const llmLabel = computed(() => {
+  const llm = health.value?.llm
+  if (!llm) return '模型状态未知'
+  return llm.ok ? `${llm.provider} 已连接` : `${llm.provider} 未连接`
+})
 
 onMounted(async () => {
   try { health.value = await sysApi.health() } catch {}

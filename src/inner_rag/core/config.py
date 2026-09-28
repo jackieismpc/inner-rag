@@ -17,7 +17,7 @@ class Settings(BaseSettings):
 
     # ── Application ────────────────────────────────────────────────────
     APP_NAME: str = "inner-rag Knowledge Base"
-    APP_VERSION: str = "0.2.0"
+    APP_VERSION: str = "0.3.0"
     DEBUG: bool = True
     SECRET_KEY: str = "change-me-in-production"
 
@@ -38,10 +38,49 @@ class Settings(BaseSettings):
     AUTO_CREATE_TABLES: bool = False
     SQL_ECHO: bool = False
 
-    # ── LLM / Embeddings ───────────────────────────────────────────────
+    # ── LLM / Embeddings：provider 选择 ─────────────────────────────────
+    # API 优先：开发时直接调云端 API，不依赖本地 Ollama；需要本地/离线时可切 mock。
+    #   LLM_PROVIDER       = ollama | openrouter | deepseek | openai | mock
+    #   EMBEDDING_PROVIDER = ollama | openrouter | openai | mock（DeepSeek 没有 embedding API）
+    LLM_PROVIDER: str = "ollama"
+    EMBEDDING_PROVIDER: str = "ollama"
+
+    # Ollama（本地，无需密钥）
     OLLAMA_BASE_URL: str = "http://localhost:11434"
     OLLAMA_LLM_MODEL: str = "qwen3:14b"
     OLLAMA_EMBEDDING_MODEL: str = "qwen3-embedding:8b"
+
+    # OpenRouter（OpenAI 兼容的云端聚合网关）
+    OPENROUTER_BASE_URL: str = "https://openrouter.ai/api/v1"
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_CHAT_MODEL: str = "deepseek/deepseek-v3.2"
+    # 免费路由：1024 维、上下文只有 512 token，建议配合 EMBEDDING_MAX_INPUT_CHARS
+    OPENROUTER_EMBEDDING_MODEL: str = "liquid/lfm-2.5-embedding-350m:free"
+
+    # DeepSeek（只有 chat completion，不支持 embedding）
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
+    DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_CHAT_MODEL: str = "deepseek-chat"
+
+    # OpenAI（也可指向任何 OpenAI 兼容的自建网关）
+    OPENAI_BASE_URL: str = "https://api.openai.com/v1"
+    OPENAI_API_KEY: str = ""
+    OPENAI_CHAT_MODEL: str = "gpt-4o-mini"
+    OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
+
+    # Mock（离线演示与测试：不联网、不需要密钥，但只有词面相似度）
+    MOCK_CHAT_MODEL: str = "mock-chat"
+    MOCK_EMBEDDING_MODEL: str = "mock-embedding"
+    MOCK_EMBEDDING_DIM: int = 256
+
+    # 云端调用参数（Ollama 同样复用 temperature / max_tokens）
+    LLM_TEMPERATURE: float = 0.3
+    LLM_MAX_TOKENS: int = 2048
+    LLM_TIMEOUT: float = 60.0
+    LLM_MAX_RETRIES: int = 2
+    # embedding 单条输入的字符上限（0 = 不截断）。分块按字符切、模型按 token 限，
+    # 对上下文很小的模型（如 512 token 的免费 embedding）显式截断可避免上游报错。
+    EMBEDDING_MAX_INPUT_CHARS: int = 0
 
     # ── Vector store ───────────────────────────────────────────────────
     CHROMA_PERSIST_DIR: str = "./data/chroma_db"
@@ -99,8 +138,17 @@ class Settings(BaseSettings):
 
     @property
     def embedding_key(self) -> str:
-        """当前 embedding 的身份标识，写入知识库并用于向量空间一致性校验。"""
-        return f"ollama:{self.OLLAMA_EMBEDDING_MODEL}"
+        """当前 embedding 的身份标识（``provider:model``）。
+
+        写入知识库并用于向量空间一致性校验：换了 provider 或模型后，旧知识库
+        会被校验拦下，而不是静默地拿两套向量空间互相检索。
+
+        延迟 import 避免 ``core.config`` <-> ``providers.specs`` 循环依赖；
+        provider 配置非法时抛 ProviderError，由 API 层映射成 503。
+        """
+        from inner_rag.providers.specs import embedding_spec
+
+        return embedding_spec().identity
 
     @property
     def sqlite_file_path(self) -> Path | None:

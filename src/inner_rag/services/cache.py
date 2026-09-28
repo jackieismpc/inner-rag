@@ -137,17 +137,19 @@ class QueryCache:
 
 
 class EmbeddingCache:
-    """向量缓存：key = embedding 模型标识 + 文本 hash。
+    """向量缓存：key = embedding 身份（provider:model） + 文本 hash。
 
-    带上模型标识，切换 embedding 模型后不会命中旧向量。
+    带上 provider 与模型，切换后端/模型后不会命中旧向量。
+    身份是动态读取的：不在 import 时固化 settings，避免配置非法（例如
+    EMBEDDING_PROVIDER 写错）时连服务都启不来，而是等真正嵌入时报 503。
     """
 
     def __init__(self) -> None:
         self._cache = LRUCache(max_size=settings.EMBEDDING_CACHE_MAX_SIZE, ttl=0)
-        self._prefix = f"e:{settings.embedding_key}:"
 
     def _make_key(self, text: str) -> str:
-        return self._prefix + hashlib.sha256(text.encode()).hexdigest()
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        return f"e:{settings.embedding_key}:{digest}"
 
     # 同步接口：供 LangChain 内部同步调用路径使用
     def get_sync(self, text: str) -> list[float] | None:

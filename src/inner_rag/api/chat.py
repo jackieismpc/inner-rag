@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from inner_rag.core.config import settings
 from inner_rag.core.database import SessionLocal, get_db
 from inner_rag.models import Conversation, KnowledgeBase, Message
+from inner_rag.providers import ProviderError
 from inner_rag.schemas import ChatRequest, ConversationOut, MessageOut, PageData, ResponseModel
 from inner_rag.services.rag import DEFAULT_STRATEGY, rag_service, sse_event
 from inner_rag.services.vector_store import Strategy
@@ -170,6 +171,10 @@ async def send_message(body: ChatRequest, db: Session = Depends(get_db)):
         answer, sources = await rag_service.chat(
             body.kb_id, body.question, history, strategy=strategy
         )
+    except ProviderError as exc:
+        # 模型后端没配好：503 + 直接给出该怎么改 .env
+        logger.error(f"[CHAT] provider 不可用 kb={body.kb_id}: {exc}")
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except Exception as exc:
         logger.error(f"[CHAT] 推理失败 kb={body.kb_id}: {exc}")
         raise HTTPException(status_code=500, detail=f"推理失败: {exc}") from exc
@@ -214,6 +219,9 @@ async def stream_message(body: ChatRequest, db: Session = Depends(get_db)):
                     elif event_type == "done":
                         full_answer = data or ""
                 yield chunk
+        except ProviderError as exc:
+            logger.error(f"[CHAT] provider 不可用 kb={kb_id}: {exc}")
+            yield sse_event("error", str(exc))
         except Exception as exc:
             logger.error(f"[CHAT] 流式推理失败 kb={kb_id}: {exc}")
             yield sse_event("error", str(exc))

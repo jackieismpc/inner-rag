@@ -1,4 +1,4 @@
-"""系统状态 API：健康检查、检索统计、缓存管理、模型列表。"""
+"""系统状态 API：健康检查、检索统计、缓存管理、provider 与模型列表。"""
 
 from __future__ import annotations
 
@@ -7,24 +7,58 @@ import asyncio
 from fastapi import APIRouter, Query
 
 from inner_rag.core.config import settings
+from inner_rag.providers import (
+    chat_health,
+    chat_models,
+    embedding_health,
+    provider_catalog,
+)
+from inner_rag.providers.specs import ProviderError, chat_spec, embedding_spec
 from inner_rag.services.cache import embedding_cache, query_cache
-from inner_rag.services.rag import rag_service
 from inner_rag.services.retrieval_log import RetrievalStats
 
 router = APIRouter(prefix="/api/system", tags=["系统"])
 
 
+def _safe(callable_) -> str | None:
+    """读取可能因配置非法而失败的字段，失败返回 None（用于展示类接口）。"""
+    try:
+        return callable_()
+    except ProviderError:
+        return None
+
+
 @router.get("/health")
-async def health_check():
+async def health_check(
+    probe: bool = Query(default=True, description="是否真实探测 provider（离线环境可关）"),
+):
+    """探活当前 chat / embedding provider。
+
+    provider 配置非法（未知名称、缺 API Key）时返回 200 + status=degraded，
+    并在 error 里写清该改哪个环境变量 —— 探活接口本身不应该 5xx。
+    """
     # 探活是网络调用，放到线程里跑，避免阻塞事件循环
-    ollama_ok = await asyncio.to_thread(rag_service.test_connection)
-    status = "healthy" if ollama_ok else "degraded"
+    llm = await asyncio.to_thread(chat_health, probe)
+    embedding = embedding_health()
+    status = "healthy" if llm["ok"] and embedding["ok"] else "degraded"
     return {
         "status": status,
-        "ollama": ollama_ok,
-        "llm_model": settings.OLLAMA_LLM_MODEL,
-        "embedding_model": settings.OLLAMA_EMBEDDING_MODEL,
         "version": settings.APP_VERSION,
+        "llm": llm,
+        "embedding": embedding,
+    }
+
+
+@router.get("/providers")
+async def list_providers():
+    """列出支持的 provider、当前选择与 Key 是否已配置（不回显任何密钥）。"""
+    return {
+        "data": provider_catalog(),
+        "active": {
+            "llm": settings.LLM_PROVIDER,
+            "embedding": settings.EMBEDDING_PROVIDER,
+        },
+        "embedding_key": _safe(lambda: settings.embedding_key),
     }
 
 
@@ -54,6 +88,11 @@ async def get_config():
     return {
         "app_name": settings.APP_NAME,
         "version": settings.APP_VERSION,
+        "llm_provider": settings.LLM_PROVIDER,
+        "llm_model": _safe(lambda: chat_spec().model),
+        "embedding_provider": settings.EMBEDDING_PROVIDER,
+        "embedding_model": _safe(lambda: embedding_spec().model),
+        "embedding_key": _safe(lambda: settings.embedding_key),
         "top_k": settings.TOP_K,
         "rerank_top_k": settings.RERANK_TOP_K,
         "score_threshold": settings.RETRIEVAL_SCORE_THRESHOLD,
@@ -68,4 +107,5 @@ async def get_config():
 
 @router.get("/models")
 async def list_models():
-    return {"models": await asyncio.to_thread(rag_service.list_models)}
+    """当前 chat provider 的可用模型列表（provider 不可达时 error 里有原因）。"""
+    return await asyncio.to_thread(chat_models)
