@@ -24,6 +24,39 @@
 
 ---
 
+## [Phase 3] 2026-09-28 — 容器镜像构建：本机验证依赖安装与启动链路（真实 Dockerfile 仍待 CI）
+
+- 类型：文档
+- 目的：Phase 3 遗留的最后一项「未验证」是 Docker 镜像构建（本机无 docker socket 权限）。
+  全推给 Phase 10 的 CI，意味着 Dockerfile / `uv.lock` 的问题要到很晚才暴露；
+  本阶段先回答一个更小的问题：**镜像里能不能装出可用环境**。
+- 方案：
+  - 用 conda 装 podman 5.8.3 到独立环境（`~/anaconda3/envs/podman`，不动 base，`conda env remove -n podman` 可回退）；
+    以 vfs 存储（本机无 `fuse-overlayfs`）+ 用户级 `~/.config/containers/{storage.conf,registries.conf,policy.json}`
+    跑 rootless 构建。
+  - 实测结论：本机**无法完整构建仓库 Dockerfile**，原因在环境而非 Dockerfile——
+    rootless 需要 setuid root 的 `newuidmap`/`newgidmap`（Debian `uidmap` 包），只有管理员能装；
+    退到 podman 的「单 ID 映射」兜底（`USER` 指向在 `/etc/subuid` 无条目的用户名）后只映射容器 uid 0，
+    于是第 5 步必然失败：apt 要降权到 `_apt`（uid 42）、`useradd --uid 10001 app` 与 `chown -R app:app` 都不可映射。
+  - 因此改用一份**仅本地使用、不提交**的变体 Dockerfile：只替换上述三处环境不可行点（apt 关闭沙箱降权、去掉
+    `useradd` 与 `chown`），其余步骤（基础镜像、uv 安装、`uv sync --frozen` 两层、迁移与启动）与仓库版本逐行一致。
+- 效果：
+  - `podman build` 成功产出镜像（`Successfully tagged localhost/inner-rag:verify`）；
+    依赖层 `uv sync --frozen --no-install-project --no-dev` 在 CPython 3.13.15 上按 `uv.lock` **冻结安装 129 个包**
+    （无版本漂移、无解析失败），项目层装上 `inner-rag==0.3.0 (from file:///app)`。
+  - 镜像可实跑：`alembic upgrade head` 执行 0001→0002 → uvicorn 启动 →
+    `curl http://127.0.0.1:18010/api/system/health` 返回 **HTTP 200**
+    （`degraded` 仅因本机未运行 Ollama，响应里 `llm.error` 明确指出连不上 11434，符合预期）。
+  - 基础镜像可达性：`docker.io/library/python:3.13-slim` 与 `ghcr.io/astral-sh/uv:latest` 均能经本机代理拉取；
+    `apt-get install git libgomp1` 在容器内成功执行。
+  - 仍未验证（写入风险登记簿）：仓库 Dockerfile 的 `apt-get`（默认 apt 沙箱降权）、`useradd --uid 10001 app`、
+    `chown -R app:app /data /app` 与 `USER app` 的运行期权限行为——这三行加非 root 运行需要真 Docker 或
+    Phase 10 的 CI 逐字节验证。
+  - 环境回收：删除 11G 容器存储（vfs 每层全量拷贝），保留 conda podman 环境与配置以便后续复用。
+- 涉及提交：本次提交（CHANGELOG、风险登记簿、README 部署说明）
+
+---
+
 ## [Phase 3] 2026-09-28 — 前端构建验证：本机补齐 Node 工具链并跑通 npm run build
 
 - 类型：优化

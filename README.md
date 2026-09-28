@@ -444,6 +444,12 @@ docker compose logs -f api
 镜像里的 `OLLAMA_BASE_URL` 默认指向 `host.docker.internal:11434`（Compose 已加 `extra_hosts`），
 如需指向云端 API，直接在 `.env` 或 Compose 环境变量里覆盖。
 
+镜像构建状态：Dockerfile 的依赖安装与启动链路已在本机用 podman（无 sudo）实测通过——
+按 `uv.lock` 冻结安装 129 个包，容器内 `alembic upgrade head` 与 `/api/system/health`（200）均正常。
+本机缺少 rootless 必需的 `newuidmap`（setuid root，需管理员安装），因此 apt 沙箱降权、
+`useradd --uid 10001 app`、`chown -R app:app` 这三行与非 root 运行只能在真 Docker 或 Phase 10 的 CI 中验证；
+详见 `CHANGELOG.md` 对应条目与 `docs/DEVELOPMENT_PLAN.md` 风险登记簿。
+
 前端生产构建：
 
 ```bash

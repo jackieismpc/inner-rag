@@ -430,7 +430,7 @@ README 基准表对比：
 | 抽象层改造成回归 | 功能退化 | 每个插件点先补契约测试再抽接口；G1/G3 双门禁；小步提交 |
 | 向量库从 Chroma 迁到 zvec | 存量知识库需重建；行为差异可能改变召回 | 先补 `VectorStore` 契约测试再实现 zvec adapter；迁移用「重跑建库 + 小库指标对比」，不回归才切默认；Chroma 实现保留一个版本可回退 |
 | zvec 上游仍在快速迭代 | SDK/接口变更 | 依赖走可选 extra 并锁版本；适配器只实现在 `VectorStore` 内部，接口层不泄漏 zvec 类型 |
-| 本机原先无 Node/npm、无 docker socket 权限 | 前端构建与镜像无法本地验证 | 已用官方 tarball 把 Node LTS 装到 `~/.local/node`（无需 sudo，不动 conda base），`npm install && npm run build` 已实测通过；docker 镜像构建仍只能交给 CI 或具备权限的机器 |
+| 本机无 Node/npm、无 docker socket 权限、无 `uidmap`（rootless 容器运行时必需） | 前端构建与镜像无法本地验证 | 前端：已用官方 tarball 把 Node LTS 装到 `~/.local/node`（无需 sudo），`npm install && npm run build` 已实测通过。镜像：conda 装 podman 5.8.3 后，用「只替换三处环境不可行点」的本地变体 Dockerfile 实测通过——`uv sync --frozen` 冻结安装 129 个包、容器内 `alembic upgrade head` + `/api/system/health` 返回 200；但仓库 Dockerfile 的 apt 沙箱降权、`useradd --uid 10001`、`chown app:app`（以及非 root 运行的 `USER app`）在单 ID 映射下无法执行（rootless 需 setuid root 的 `newuidmap`，仅管理员可装），逐字节验证留给 Phase 10 的 CI |
 | SQLite 并发写入 | `database is locked` | 已开 WAL + `busy_timeout`；上传并发受限；需要并发就切 PostgreSQL（Phase 10 实测） |
 | 权限改造范围蔓延 | 拖慢主线、复杂度上升 | Phase 3 明确只做「单租户 + 本地登录 + 知识库级 ACL」，多租户 / SSO / 审计不做 |
 | 迁移漂移 | 部署时炸 | G1 固定跑 `alembic check`；任何 schema 变更必须带 revision |
