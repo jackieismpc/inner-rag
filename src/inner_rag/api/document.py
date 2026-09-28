@@ -15,8 +15,10 @@ from fastapi import (
 from loguru import logger
 from sqlalchemy.orm import Session
 
+from inner_rag.api.deps import ensure_doc_access, ensure_kb_access, get_current_user
+from inner_rag.core.access import AccessLevel
 from inner_rag.core.database import get_db
-from inner_rag.models import DocStatus, Document, KnowledgeBase
+from inner_rag.models import DocStatus, Document, User
 from inner_rag.schemas import DocOut, LocalPathImport, PageData, ResponseModel
 from inner_rag.services.document import doc_service
 from inner_rag.services.parser import parser
@@ -32,7 +34,9 @@ def list_docs(
     status: str | None = None,
     keyword: str | None = None,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
+    ensure_kb_access(db, kb_id, user, AccessLevel.READ)
     query = db.query(Document).filter(Document.kb_id == kb_id)
     if status:
         query = query.filter(Document.status == status)
@@ -61,10 +65,10 @@ async def upload_files(
     kb_id: int = Form(...),
     files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """上传文件到指定知识库（流式落盘 + 大小限制，随后交给后台任务处理）。"""
-    if db.get(KnowledgeBase, kb_id) is None:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+    ensure_kb_access(db, kb_id, user, AccessLevel.WRITE)
     if not files:
         raise HTTPException(status_code=400, detail="未选择文件")
 
@@ -100,7 +104,7 @@ async def upload_files(
     for doc_id in doc_ids:
         background_tasks.add_task(doc_service.process_document, doc_id)
 
-    logger.info(f"[DOC] 上传 {len(doc_ids)} 个文件到 kb={kb_id}")
+    logger.info(f"[DOC] 上传 {len(doc_ids)} 个文件到 kb={kb_id} user={user.username}")
     return ResponseModel(
         message=f"成功上传 {len(doc_ids)} 个文件，正在后台处理中",
         data={"doc_ids": doc_ids},
@@ -112,10 +116,10 @@ async def import_from_local_path(
     background_tasks: BackgroundTasks,
     body: LocalPathImport,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """从服务器本地路径导入文件（默认禁用，需 ALLOW_LOCAL_IMPORT=true）。"""
-    if db.get(KnowledgeBase, body.kb_id) is None:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+    ensure_kb_access(db, body.kb_id, user, AccessLevel.WRITE)
 
     try:
         doc_service.validate_import_source(body.path)
@@ -129,17 +133,22 @@ async def import_from_local_path(
 
 
 @router.get("/{doc_id}", response_model=ResponseModel)
-def get_doc(doc_id: int, db: Session = Depends(get_db)):
-    doc = db.get(Document, doc_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="文档不存在")
+def get_doc(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    doc = ensure_doc_access(db, doc_id, user, AccessLevel.READ)
     return ResponseModel(data=DocOut.model_validate(doc))
 
 
 @router.delete("/{doc_id}", response_model=ResponseModel)
-def delete_doc(doc_id: int, db: Session = Depends(get_db)):
-    if db.get(Document, doc_id) is None:
-        raise HTTPException(status_code=404, detail="文档不存在")
+def delete_doc(
+    doc_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    ensure_doc_access(db, doc_id, user, AccessLevel.WRITE)
     doc_service.delete_document(db, doc_id)
     return ResponseModel(message="删除成功")
 
@@ -149,11 +158,10 @@ async def reprocess_doc(
     doc_id: int,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
     """重新处理文档（失败后重试，或强制重建索引）。"""
-    doc = db.get(Document, doc_id)
-    if not doc:
-        raise HTTPException(status_code=404, detail="文档不存在")
+    doc = ensure_doc_access(db, doc_id, user, AccessLevel.WRITE)
 
     doc.status = DocStatus.PENDING
     doc.error_msg = None

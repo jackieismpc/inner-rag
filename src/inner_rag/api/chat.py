@@ -11,9 +11,11 @@ from fastapi.responses import StreamingResponse
 from loguru import logger
 from sqlalchemy.orm import Session
 
+from inner_rag.api.deps import ensure_kb_access, get_current_user
+from inner_rag.core.access import AccessLevel
 from inner_rag.core.config import settings
 from inner_rag.core.database import SessionLocal, get_db
-from inner_rag.models import Conversation, KnowledgeBase, Message
+from inner_rag.models import Conversation, Message, User
 from inner_rag.providers import ProviderError
 from inner_rag.schemas import ChatRequest, ConversationOut, MessageOut, PageData, ResponseModel
 from inner_rag.services.rag import DEFAULT_STRATEGY, rag_service, sse_event
@@ -41,6 +43,10 @@ def _get_or_create_conversation(
     if conv_id is not None:
         conv = db.get(Conversation, conv_id)
         if conv is not None:
+            # 会话必须属于当前 kb：否则可以拿「自己有权限的 kb_id + 别人库的 conv_id」
+            # 把别人的会话历史读进 prompt，并把回答写回别人的会话里
+            if conv.kb_id != kb_id:
+                raise HTTPException(status_code=404, detail="会话不存在")
             return conv
 
     title = question[:20] + "..." if len(question) > 20 else question
@@ -108,7 +114,9 @@ def list_conversations(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ):
+    ensure_kb_access(db, kb_id, user, AccessLevel.READ)
     query = db.query(Conversation).filter(Conversation.kb_id == kb_id)
     total = query.count()
     items = (
@@ -128,9 +136,15 @@ def list_conversations(
 
 
 @router.get("/conversations/{conv_id}/messages", response_model=ResponseModel)
-def get_messages(conv_id: int, db: Session = Depends(get_db)):
-    if db.get(Conversation, conv_id) is None:
+def get_messages(
+    conv_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    conv = db.get(Conversation, conv_id)
+    if conv is None:
         raise HTTPException(status_code=404, detail="会话不存在")
+    ensure_kb_access(db, conv.kb_id, user, AccessLevel.READ)
     messages = (
         db.query(Message)
         .filter(Message.conv_id == conv_id)
@@ -141,10 +155,15 @@ def get_messages(conv_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/conversations/{conv_id}", response_model=ResponseModel)
-def delete_conversation(conv_id: int, db: Session = Depends(get_db)):
+def delete_conversation(
+    conv_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     conv = db.get(Conversation, conv_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="会话不存在")
+    ensure_kb_access(db, conv.kb_id, user, AccessLevel.READ)
     db.delete(conv)
     db.commit()
     return ResponseModel(message="删除成功")
@@ -154,10 +173,13 @@ def delete_conversation(conv_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/send", response_model=ResponseModel)
-async def send_message(body: ChatRequest, db: Session = Depends(get_db)):
+async def send_message(
+    body: ChatRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
     """发送消息（非流式）。"""
-    if db.get(KnowledgeBase, body.kb_id) is None:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+    ensure_kb_access(db, body.kb_id, user, AccessLevel.READ)
     strategy = _resolve_strategy(body.strategy)
 
     conv = _get_or_create_conversation(db, body.kb_id, body.conv_id, body.question)
@@ -189,10 +211,13 @@ async def send_message(body: ChatRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/stream")
-async def stream_message(body: ChatRequest, db: Session = Depends(get_db)):
-    """发送消息（SSE 流式）。"""
-    if db.get(KnowledgeBase, body.kb_id) is None:
-        raise HTTPException(status_code=404, detail="知识库不存在")
+async def stream_message(
+    body: ChatRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """发送消息（SSE 流式）。判权必须在返回 StreamingResponse 之前：否则 403 会被夹在流里发出。"""
+    ensure_kb_access(db, body.kb_id, user, AccessLevel.READ)
     strategy = _resolve_strategy(body.strategy)
 
     conv = _get_or_create_conversation(db, body.kb_id, body.conv_id, body.question)

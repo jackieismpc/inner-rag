@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Depends, Query
 
+from inner_rag.api.deps import get_current_user
 from inner_rag.core.config import settings
+from inner_rag.models import User
 from inner_rag.providers import (
     chat_health,
     chat_models,
@@ -18,6 +20,9 @@ from inner_rag.services.cache import embedding_cache, query_cache
 from inner_rag.services.retrieval_log import RetrievalStats
 
 router = APIRouter(prefix="/api/system", tags=["系统"])
+
+# /health 必须免鉴权：监控与探活不能依赖登录（且它永不 5xx，只报 degraded）。
+# 其余系统接口（provider 目录、统计、缓存、运行时配置、模型列表）需要登录。
 
 
 def _safe(callable_) -> str | None:
@@ -50,7 +55,7 @@ async def health_check(
 
 
 @router.get("/providers")
-async def list_providers():
+async def list_providers(user: User = Depends(get_current_user)):
     """列出支持的 provider、当前选择与 Key 是否已配置（不回显任何密钥）。"""
     return {
         "data": provider_catalog(),
@@ -63,7 +68,7 @@ async def list_providers():
 
 
 @router.get("/stats")
-async def get_stats():
+async def get_stats(user: User = Depends(get_current_user)):
     """检索命中率 + 缓存状态。"""
     return {
         "retrieval": RetrievalStats.summary(),
@@ -73,7 +78,9 @@ async def get_stats():
 
 
 @router.post("/cache/clear")
-async def clear_cache(kb_id: int | None = Query(default=None)):
+async def clear_cache(
+    user: User = Depends(get_current_user), kb_id: int | None = Query(default=None)
+):
     """手动清除缓存：指定 kb_id 仅清该知识库，否则全清。"""
     if kb_id is not None:
         cleared = await query_cache.invalidate_kb(kb_id)
@@ -83,7 +90,7 @@ async def clear_cache(kb_id: int | None = Query(default=None)):
 
 
 @router.get("/config")
-async def get_config():
+async def get_config(user: User = Depends(get_current_user)):
     """返回前端可用的非敏感运行时配置。"""
     return {
         "app_name": settings.APP_NAME,
@@ -106,6 +113,6 @@ async def get_config():
 
 
 @router.get("/models")
-async def list_models():
+async def list_models(user: User = Depends(get_current_user)):
     """当前 chat provider 的可用模型列表（provider 不可达时 error 里有原因）。"""
     return await asyncio.to_thread(chat_models)
