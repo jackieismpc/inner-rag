@@ -11,7 +11,8 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        // 后端默认端口 8010（见 .env.example 的 PORT）
+        target: process.env.VITE_API_TARGET || 'http://localhost:8010',
         changeOrigin: true,
       }
     }

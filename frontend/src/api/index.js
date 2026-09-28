@@ -1,7 +1,10 @@
 import axios from 'axios'
 
+// 相对路径：走 Vite 代理（开发）或同源部署（生产）。
+// 旧代码写死了绝对地址（且开头多一个空格），既绕过了代理，又与 vite.config.js 里的
+// 端口配置重复，端口一改就全部失效。
 const http = axios.create({
-  baseURL: ' http://localhost:8000/api',
+  baseURL: import.meta.env.VITE_API_BASE || '/api',
   timeout: 60000,
 })
 

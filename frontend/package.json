@@ -1,7 +1,7 @@
 {
-  "name": "rag-frontend",
-  "version": "1.0.0",
-  "description": "Enterprise RAG Knowledge Base - Frontend by hua",
+  "name": "inner-rag-frontend",
+  "version": "0.2.0",
+  "description": "inner-rag Knowledge Base - Vue 3 + Vite frontend",
   "type": "module",
   "scripts": {
     "dev": "vite --port 3000",

@@ -108,7 +108,9 @@
                       <p class="font-medium text-gray-700 truncate">{{ src.filename }}{{ src.page ? ` · 第${src.page}页` : '' }}</p>
                       <p class="text-gray-500 mt-0.5 line-clamp-2">{{ src.content }}</p>
                     </div>
-                    <span class="text-gray-400 flex-shrink-0 self-start">{{ (src.score * 100).toFixed(0) }}%</span>
+                    <span v-if="src.score !== null && src.score !== undefined"
+                      class="text-gray-400 flex-shrink-0 self-start">{{ (src.score * 100).toFixed(0) }}%</span>
+                    <span v-else class="text-gray-300 flex-shrink-0 self-start" title="该来源由 MMR 召回，没有相关度分数">—</span>
                   </div>
                 </div>
               </div>
