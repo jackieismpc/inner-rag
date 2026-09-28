@@ -24,6 +24,22 @@
 
 ---
 
+## [Phase 2.2] 2026-09-28 — 新增 scripts/gates.sh，把 G0/G1/G2 变成可执行门禁
+
+- 类型：新增功能
+- 目的：`docs/DEVELOPMENT_PLAN.md` §5 的门禁一直只是文档里的命令块，靠人脑记、手抄、可能漏步；
+  尤其「push 前必须更新 CHANGELOG.md」是行为纪律，不落到脚本就拦不住。
+- 方案：新增 `scripts/gates.sh`，支持 `g0|g1|g2|all`：
+  - G0：`ruff check` + `ruff format --check` + `benchmark --mode fixtures`（离线自检，不写 README）；
+  - G1：G0 + `mypy` + `pytest -q` + Alembic 迁移自检（临时干净库 `upgrade→check→downgrade→upgrade`，
+    不依赖本机 `./data`）+ 临时端口 8011 冒烟探活 + **changelog 检查** + 密钥/敏感文件自检；
+  - G2：`pytest -m live` 联网验收，并打印无法脚本化的手动步骤。
+- 效果：`./scripts/gates.sh g0` 已实测通过（ruff 全绿、63 文件格式正常、fixtures 自检正常输出指标）；
+  脚本通过 `bash -n` 语法检查。
+- 涉及提交：待提交（本次改动）
+
+---
+
 ## [Phase 2.2] 2026-09-28 — 测试策略改为「覆盖准确 > 数量」
 
 - 类型：文档

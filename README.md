@@ -345,6 +345,8 @@ uv run pytest -m live -q       # 真实 provider 联网验收（需 OPENROUTER_A
 uv run pytest -q tests/test_api.py::test_chat_stream_events_and_persistence
 uv run mypy                    # 类型检查（配置见 pyproject.toml 的 [tool.mypy]）
 uv run python -m benchmark.run_bench --mode fixtures   # 基准脚本离线自检（评测集校验 + 指标算法）
+./scripts/gates.sh g0          # 门禁 G0（每次提交）：ruff + 评测离线自检
+./scripts/gates.sh g1          # 门禁 G1（push 前）：G0 + mypy + 离线全量 + 迁移自检 + 冒烟 + changelog / 密钥检查
 ```
 
 测试说明：`tests/conftest.py` 在导入应用之前就把环境切到临时 SQLite、临时目录与固定的 `mock`
