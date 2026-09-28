@@ -5,7 +5,8 @@
     uv run pytest -m live -q
 
 前置条件：``.env`` 里填好 ``OPENROUTER_API_KEY``（embedding 用免费路由，
-chat 会产生少量费用）。没有 Key 的用例会 skip，而不是失败。
+chat 会产生少量费用）；DeepSeek 用例另需 ``DEEPSEEK_API_KEY``。
+没有 Key 的用例会 skip，而不是失败。
 
 成本控制：只嵌入 docs/samples/acceptance.txt 这一份小文档，且 embedding
 结果进 EmbeddingCache，同一次运行内不会重复计费。
@@ -34,6 +35,11 @@ def _require_openrouter_key() -> None:
         pytest.skip("未配置 OPENROUTER_API_KEY（见 .env.example），跳过真实 provider 验收")
 
 
+def _require_deepseek_key() -> None:
+    if not settings.DEEPSEEK_API_KEY.strip():
+        pytest.skip("未配置 DEEPSEEK_API_KEY（见 .env.example），跳过 DeepSeek 验收")
+
+
 @pytest.fixture
 def openrouter(monkeypatch: pytest.MonkeyPatch):
     """把 chat 与 embedding 都切到 OpenRouter 真实 API。
@@ -54,6 +60,17 @@ def openrouter(monkeypatch: pytest.MonkeyPatch):
     yield
     reset_cache()
     embedding_service._embeddings = None
+
+
+@pytest.fixture
+def deepseek(monkeypatch: pytest.MonkeyPatch):
+    """chat 切到 DeepSeek 官方 API；embedding 保持 conftest 的 mock，不额外产生费用。"""
+    _require_deepseek_key()
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "deepseek")
+    monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "mock")
+    reset_cache()
+    yield
+    reset_cache()
 
 
 def _parse_sse(body: str) -> list[dict]:
@@ -87,6 +104,18 @@ async def test_live_embeddings_return_consistent_dimensions(openrouter: None) ->
     dims = {len(vector) for vector in vectors}
     assert len(dims) == 1 and dims.pop() > 0
     assert all(isinstance(value, float) for value in vectors[0])
+
+
+async def test_live_deepseek_chat_and_health(deepseek: None, client: TestClient) -> None:
+    """DeepSeek 走官方集成：真能回答，且 /health 不会把模型名变化误报成 degraded。"""
+    answer = await get_chat_model().ainvoke("只回复两个字：收到")
+    assert answer.content.strip()
+
+    health = client.get("/api/system/health").json()
+    assert health["status"] == "healthy", health
+    assert health["llm"]["provider"] == "deepseek"
+    assert health["llm"]["ok"] is True
+    assert health["llm"]["error"] is None
 
 
 def test_live_health_reports_healthy(openrouter: None, client: TestClient) -> None:

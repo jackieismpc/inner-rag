@@ -60,7 +60,9 @@ class Settings(BaseSettings):
     # DeepSeek（只有 chat completion，不支持 embedding）
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com/v1"
     DEEPSEEK_API_KEY: str = ""
-    DEEPSEEK_CHAT_MODEL: str = "deepseek-chat"
+    # 模型名以官方文档为准（https://api-docs.deepseek.com）：deepseek-flash 是当前主推，
+    # deepseek-v4-pro 能力更强；旧别名 deepseek-chat 仍可调用，但已不在 /models 列表里。
+    DEEPSEEK_CHAT_MODEL: str = "deepseek-flash"
 
     # OpenAI（也可指向任何 OpenAI 兼容的自建网关）
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"
@@ -78,6 +80,8 @@ class Settings(BaseSettings):
     LLM_MAX_TOKENS: int = 2048
     LLM_TIMEOUT: float = 60.0
     LLM_MAX_RETRIES: int = 2
+    # 推理强度（DeepSeek 专用）：minimal | low | medium | high，留空则不发送该字段
+    LLM_REASONING_EFFORT: str = ""
     # embedding 单条输入的字符上限（0 = 不截断）。分块按字符切、模型按 token 限，
     # 对上下文很小的模型（如 512 token 的免费 embedding）显式截断可避免上游报错。
     EMBEDDING_MAX_INPUT_CHARS: int = 0

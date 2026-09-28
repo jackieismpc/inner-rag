@@ -5,10 +5,11 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.embeddings import Embeddings
+from langchain_deepseek import ChatDeepSeek
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
-from inner_rag.core.config import settings
+from inner_rag.core.config import Settings, settings
 from inner_rag.providers import (
     ProviderError,
     chat_health,
@@ -37,6 +38,12 @@ def _use_openrouter(monkeypatch: pytest.MonkeyPatch, key: str = "sk-test-key") -
     monkeypatch.setattr(settings, "OPENROUTER_API_KEY", key)
     monkeypatch.setattr(settings, "LLM_PROVIDER", "openrouter")
     monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "openrouter")
+    reset_cache()
+
+
+def _use_deepseek(monkeypatch: pytest.MonkeyPatch, key: str = "sk-deepseek") -> None:
+    monkeypatch.setattr(settings, "DEEPSEEK_API_KEY", key)
+    monkeypatch.setattr(settings, "LLM_PROVIDER", "deepseek")
     reset_cache()
 
 
@@ -131,6 +138,43 @@ def test_ollama_chat_params_are_mapped(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(model, ChatOllama)
     assert model.model == "qwen3:14b"
     assert str(model.base_url) == "http://127.0.0.1:12345"
+
+
+def test_deepseek_uses_official_langchain_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DeepSeek 走官方 langchain-deepseek：字段名与 OpenAI 兼容层不同。"""
+    _use_deepseek(monkeypatch)
+    monkeypatch.setattr(settings, "DEEPSEEK_CHAT_MODEL", "deepseek-flash")
+    monkeypatch.setattr(settings, "LLM_MAX_TOKENS", 512)
+    reset_cache()
+
+    model = get_chat_model()
+    assert isinstance(model, ChatDeepSeek)
+    assert model.model_name == "deepseek-flash"
+    assert str(model.api_base) == settings.DEEPSEEK_BASE_URL
+    # 官方集成用 max_tokens，而不是兼容层的 max_completion_tokens
+    assert model.max_tokens == 512
+    assert model.temperature == settings.LLM_TEMPERATURE
+    assert model.max_retries == settings.LLM_MAX_RETRIES
+
+
+def test_deepseek_default_model_matches_official_docs() -> None:
+    """默认模型名必须与官方文档一致：deepseek-chat 已从 /models 列表下架。"""
+    assert Settings.model_fields["DEEPSEEK_CHAT_MODEL"].default == "deepseek-flash"
+
+
+def test_deepseek_reasoning_effort_is_optional(monkeypatch: pytest.MonkeyPatch) -> None:
+    _use_deepseek(monkeypatch)
+    monkeypatch.setattr(settings, "LLM_REASONING_EFFORT", "   ")
+    reset_cache()
+    model = get_chat_model()
+    assert isinstance(model, ChatDeepSeek)
+    assert model.reasoning_effort is None  # 留空表示不下发该参数
+
+    monkeypatch.setattr(settings, "LLM_REASONING_EFFORT", "high")
+    reset_cache()
+    model = get_chat_model()
+    assert isinstance(model, ChatDeepSeek)
+    assert model.reasoning_effort == "high"
 
 
 def test_true_cloud_embedding_uses_openai_compatible_client(
@@ -286,6 +330,68 @@ def test_health_is_ok_with_mock_provider(
     assert body["llm"]["provider"] == "mock"
     assert body["llm"]["model"] == settings.MOCK_CHAT_MODEL
     assert body["embedding"]["provider"] == "mock"
+
+
+def test_health_flags_missing_model_for_authoritative_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """模型列表可信的 provider：模型不在列表里就是配置错误，并给出当前可选值。"""
+    _use_openrouter(monkeypatch)
+    monkeypatch.setattr(settings, "OPENROUTER_CHAT_MODEL", "ghost/model")
+    monkeypatch.setattr(
+        "inner_rag.providers.factory._discover_models",
+        lambda spec: (["some-org/some-model"], None),
+    )
+    reset_cache()
+
+    health = chat_health()
+    assert health["ok"] is False
+    assert health["model_available"] is False
+    assert "ghost/model" in health["error"]
+    assert "some-org/some-model" in health["error"]
+    assert health["warning"] is None
+
+
+def test_health_warns_instead_of_failing_when_model_list_is_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DeepSeek 的 /models 只列主推模型，旧别名仍可调用：告警，但不判 degraded。"""
+    _use_deepseek(monkeypatch)
+    monkeypatch.setattr(settings, "DEEPSEEK_CHAT_MODEL", "deepseek-chat")
+    monkeypatch.setattr(
+        "inner_rag.providers.factory._discover_models",
+        lambda spec: (["deepseek-flash", "deepseek-v4-pro"], None),
+    )
+    reset_cache()
+
+    assert chat_spec().model_list_authoritative is False
+    health = chat_health()
+    assert health["ok"] is True
+    assert health["model_available"] is False
+    assert health["error"] is None
+    assert "deepseek-chat" in health["warning"]
+    assert "deepseek-flash" in health["warning"]
+
+
+def test_health_endpoint_is_healthy_for_deepseek_default_model(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DeepSeek chat + 云端 embedding 这套真实组合应当是 healthy。"""
+    _use_deepseek(monkeypatch)
+    monkeypatch.setattr(settings, "DEEPSEEK_CHAT_MODEL", "deepseek-flash")
+    monkeypatch.setattr(settings, "EMBEDDING_PROVIDER", "mock")
+    monkeypatch.setattr(
+        "inner_rag.providers.factory._discover_models",
+        lambda spec: (["deepseek-flash", "deepseek-v4-pro"], None),
+    )
+    reset_cache()
+
+    body = client.get("/api/system/health").json()
+    assert body["status"] == "healthy"
+    assert body["llm"]["provider"] == "deepseek"
+    assert body["llm"]["model"] == "deepseek-flash"
+    assert body["llm"]["model_available"] is True
+    assert body["llm"]["warning"] is None
 
 
 def test_providers_endpoint_lists_capabilities_without_secrets(

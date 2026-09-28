@@ -44,6 +44,7 @@ dependencies = [
   "pydantic-settings>=2.15.0",
   "httpx>=0.28.1",
   "loguru>=0.7.3",
+  "langchain-deepseek>=1.1.1",
 ]
 
 [project.optional-dependencies]

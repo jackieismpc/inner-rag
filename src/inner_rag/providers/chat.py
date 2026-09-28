@@ -1,8 +1,10 @@
 """Chat 模型构造：把 ``ProviderSpec`` 变成 LangChain 的 BaseChatModel。
 
 * Ollama 走 ``langchain-ollama``（本地、无需密钥）；
-* OpenRouter / DeepSeek / OpenAI 都是 OpenAI 兼容接口，统一走 ``langchain-openai``
-  的 ChatOpenAI，只换 ``base_url`` 与 ``model``；
+* DeepSeek 走官方集成 ``langchain-deepseek``（字段名与 OpenAI 兼容层略有差异，
+  且支持 ``reasoning_effort``）；
+* OpenRouter / OpenAI 都是 OpenAI 兼容接口，统一走 ``langchain-openai`` 的
+  ChatOpenAI，只换 ``base_url`` 与 ``model``；
 * Mock 是本项目自带的离线模型，用于本地演示、CI 与降级验收。
 """
 
@@ -15,6 +17,7 @@ from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_deepseek import ChatDeepSeek
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
 from loguru import logger
@@ -102,6 +105,20 @@ def build_chat_model(spec: ProviderSpec) -> BaseChatModel:
             model=spec.model,
             temperature=settings.LLM_TEMPERATURE,
             num_predict=settings.LLM_MAX_TOKENS,
+        )
+
+    if spec.name == "deepseek":
+        # 官方集成：输出长度字段是 max_tokens（不是兼容层的 max_completion_tokens）
+        return ChatDeepSeek(
+            base_url=spec.base_url,
+            model=spec.model,
+            api_key=SecretStr(spec.api_key),
+            temperature=settings.LLM_TEMPERATURE,
+            max_tokens=settings.LLM_MAX_TOKENS,
+            timeout=settings.LLM_TIMEOUT,
+            max_retries=settings.LLM_MAX_RETRIES,
+            # 留空表示不下发该参数（DeepSeek 默认行为）
+            reasoning_effort=settings.LLM_REASONING_EFFORT.strip() or None,
         )
 
     headers = OPENROUTER_HEADERS if spec.name == "openrouter" else None

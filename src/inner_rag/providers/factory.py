@@ -106,7 +106,11 @@ def _discover_models(spec: ProviderSpec) -> tuple[list[str], str | None]:
 
 
 def chat_health(probe: bool = True) -> dict[str, Any]:
-    """chat provider 的健康状态：配置是否正确 + 模型是否可用。"""
+    """chat provider 的健康状态：配置是否正确 + 模型是否可用。
+
+    ``error`` 表示真的不可用（配置错误 / provider 不可达 / 模型名不存在），
+    ``warning`` 表示「能用但值得注意」（例如该 provider 的 /models 列表不完整）。
+    """
     try:
         spec = chat_spec()
     except ProviderError as exc:
@@ -116,6 +120,7 @@ def chat_health(probe: bool = True) -> dict[str, Any]:
             "ok": False,
             "model_available": None,
             "error": str(exc),
+            "warning": None,
         }
 
     result: dict[str, Any] = {
@@ -124,6 +129,7 @@ def chat_health(probe: bool = True) -> dict[str, Any]:
         "ok": True,
         "model_available": True,
         "error": None,
+        "warning": None,
     }
     if not probe or spec.name == "mock":
         return result
@@ -133,19 +139,29 @@ def chat_health(probe: bool = True) -> dict[str, Any]:
         result.update({"ok": False, "model_available": None, "error": error})
         return result
 
-    # Ollama 必须真的把模型拉下来才能对话；云端模型列表可能分页/别名化，只做提示
+    # 列表为空（provider 没有 /models）时不下结论，避免误报
     available = spec.model in models if models else None
     result["model_available"] = available
     if available is False:
-        result.update(
-            {
-                "ok": False,
-                "error": (
-                    f"{spec.name} 可达，但模型 {spec.model} 不在返回的模型列表中，"
-                    f"请检查配置或先拉取模型"
-                ),
-            }
-        )
+        listed = "、".join(models[:5])
+        hint = f"（当前可选：{listed}）" if listed else ""
+        if spec.model_list_authoritative:
+            result.update(
+                {
+                    "ok": False,
+                    "error": (
+                        f"{spec.name} 可达，但模型 {spec.model} 不在返回的模型列表中"
+                        f"{hint}，请检查 .env 里的模型名或先拉取模型"
+                    ),
+                }
+            )
+        else:
+            # 这类 provider 的 /models 只列主推模型，旧别名仍能调用 → 告警而非失败
+            result["warning"] = (
+                f"{spec.name} 的 /models 未列出 {spec.model}{hint}；"
+                f"该列表不完整，旧模型别名通常仍可调用"
+            )
+            logger.warning(f"[PROVIDER] {result['warning']}")
     return result
 
 

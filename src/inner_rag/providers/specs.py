@@ -55,6 +55,10 @@ class ProviderSpec:
     api_key_env: str = ""
     docs_url: str = ""
     notes: str = ""
+    # provider 的 /models 是否完整列出可调用的模型名。DeepSeek 的 /models 只列当前主推
+    # 模型，旧别名（如 deepseek-chat）仍能调用，这类 provider 上「模型不在列表里」
+    # 只能给告警，不能判成不可用。
+    model_list_authoritative: bool = True
 
     @property
     def identity(self) -> str:
@@ -115,7 +119,12 @@ def _build(kind: str, name: str) -> ProviderSpec:
                 api_key=settings.DEEPSEEK_API_KEY,
                 api_key_env="DEEPSEEK_API_KEY",
                 docs_url="https://api-docs.deepseek.com",
-                notes="官方只有 chat completion，不提供 embedding 接口",
+                notes=(
+                    "官方只有 chat completion，不提供 embedding 接口；"
+                    "模型名以官方文档为准（deepseek-flash / deepseek-v4-pro），"
+                    "/models 不列出旧别名"
+                ),
+                model_list_authoritative=False,
             )
         if name == "openai":
             return ProviderSpec(
@@ -238,6 +247,7 @@ def _catalog_entry(kind: str, name: str, active_env: str) -> dict[str, Any]:
         "active": normalize(active_env) == spec.name,
         "docs_url": spec.docs_url,
         "notes": spec.notes,
+        "model_list_authoritative": spec.model_list_authoritative,
     }
 
 
