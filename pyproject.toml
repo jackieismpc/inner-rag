@@ -1,12 +1,12 @@
 [project]
 name = "inner-rag"
 version = "0.3.0"
-description = "Multi-provider RAG knowledge base — FastAPI + LangChain 1.x + ChromaDB (Ollama / OpenRouter / DeepSeek)"
+description = "Multi-provider RAG knowledge base — FastAPI + LangChain 1.x + zvec (Ollama / OpenRouter / DeepSeek)"
 readme = "README.md"
 requires-python = ">=3.13"
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["rag", "langchain", "fastapi", "chromadb", "knowledge-base"]
+keywords = ["rag", "langchain", "fastapi", "zvec", "chromadb", "knowledge-base"]
 classifiers = [
   "Private :: Do Not Upload",
   "Programming Language :: Python :: 3.13",
@@ -23,8 +23,11 @@ dependencies = [
   "langchain-text-splitters>=1.1.2",
   "langchain-ollama>=1.1.0",
   "langchain-openai>=1.6.6",
+  # Vector store（Phase 4 起默认后端）：上游 0.x 迭代快、行为会变，锁死版本，
+  # 升级必须单独提交并重跑契约测试。
+  "zvec==0.7.0",
+  # Chroma 保留为可选后端（VECTOR_STORE=chroma），仅用于对比与回归
   "langchain-chroma>=1.1.0",
-  # Vector store
   "chromadb>=1.5.9",
   # Database
   "sqlalchemy>=2.1.1",

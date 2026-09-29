@@ -1,8 +1,8 @@
 """缓存层：QueryCache（检索结果）+ EmbeddingCache（向量）。
 
 LRUCache 内部实现为同步（纯内存操作，无 I/O）并用 threading.RLock 保护，
-同时对外提供 async 包装。这样 LangChain 的同步调用路径（Chroma 内部计算
-embedding）与业务异步路径可以共享同一份缓存，避免同一段文本被重复嵌入。
+同时对外提供 async 包装。这样 LangChain 向量库（如 Chroma）内部的同步嵌入路径与业务异步路径
+可以共享同一份缓存，避免同一段文本被重复嵌入。
 """
 
 from __future__ import annotations

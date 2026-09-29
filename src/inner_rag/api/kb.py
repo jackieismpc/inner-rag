@@ -100,7 +100,7 @@ def get_kb(
 ):
     kb, level = ensure_kb_access(db, kb_id, user, AccessLevel.READ)
     data = _kb_out(kb, level).model_dump()
-    data.update(vector_service.get_kb_stats(kb_id))
+    data.update({"vector_count": vector_service.count(kb_id)})
     return ResponseModel(data=data)
 
 
@@ -121,7 +121,7 @@ def update_kb(
 
 
 @router.delete("/{kb_id}", response_model=ResponseModel)
-def delete_kb(
+async def delete_kb(
     kb_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -129,7 +129,7 @@ def delete_kb(
     kb, _ = ensure_kb_access(db, kb_id, user, AccessLevel.OWNER)
 
     # 先删向量与上传文件，再删数据库记录，避免留下孤儿数据（成员授权由外键级联删除）
-    vector_service.delete_kb(kb_id)
+    await vector_service.delete_kb(kb_id)
     shutil.rmtree(Path(settings.UPLOAD_DIR) / f"kb_{kb_id}", ignore_errors=True)
     db.delete(kb)
     db.commit()

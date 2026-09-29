@@ -95,6 +95,10 @@ class Settings(BaseSettings):
     EMBEDDING_MAX_INPUT_CHARS: int = 0
 
     # ── Vector store ───────────────────────────────────────────────────
+    # 后端选择：zvec（默认，内嵌单进程）| chroma（旧数据兼容）
+    VECTOR_STORE: str = "zvec"
+    ZVEC_PATH: str = "./data/zvec_db"
+    # 仅当 VECTOR_STORE=chroma 时生效
     CHROMA_PERSIST_DIR: str = "./data/chroma_db"
     CHROMA_COLLECTION_NAME: str = "rag_documents"
 
@@ -174,7 +178,7 @@ class Settings(BaseSettings):
         return Path(raw)
 
     def ensure_dirs(self) -> None:
-        for directory in (self.UPLOAD_DIR, self.CHROMA_PERSIST_DIR, self.LOG_DIR):
+        for directory in (self.UPLOAD_DIR, self.ZVEC_PATH, self.CHROMA_PERSIST_DIR, self.LOG_DIR):
             Path(directory).mkdir(parents=True, exist_ok=True)
         # SQLite 不会自己建目录，缺少父目录时会报 unable to open database file
         sqlite_path = self.sqlite_file_path

@@ -78,7 +78,7 @@ class RAGService:
             log_retrieval(kb_id, query, cached, latency_ms, True, strategy)
             return cached, True
 
-        results, filtered_out = await vector_service.similarity_search_async(
+        results, filtered_out = await vector_service.search(
             kb_id=kb_id,
             query=query,
             k=k,

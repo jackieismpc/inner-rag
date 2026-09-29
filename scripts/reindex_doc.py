@@ -34,7 +34,7 @@ async def reindex_doc(doc_id: int) -> None:
     finally:
         db.close()
 
-    vector_service.delete_documents(kb_id, doc_id)
+    await vector_service.delete_document(kb_id, doc_id)
     logger.info(f"已删除 doc_id={doc_id} 的旧向量")
 
     await doc_service.process_document(doc_id)

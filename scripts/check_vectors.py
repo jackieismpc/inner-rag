@@ -33,12 +33,12 @@ def main() -> None:
             return
 
         for kb in kbs:
-            stats = vector_service.get_kb_stats(kb.id)
+            vector_count = vector_service.count(kb.id)
             counts = vector_service.count_chunks_by_filename(kb.id)
             docs = db.query(Document).filter(Document.kb_id == kb.id).all()
 
             print(f"\n=== kb_id={kb.id}  {kb.name}  embedding={kb.embedding_model} ===")
-            print(f"collection 向量数: {stats['vector_count']}  文件数: {len(counts)}")
+            print(f"collection 向量数: {vector_count}  文件数: {len(counts)}")
             for filename, chunk_count in sorted(counts.items(), key=lambda kv: -kv[1]):
                 print(f"  {chunk_count:5d} chunks | {filename}")
 
@@ -52,7 +52,7 @@ def main() -> None:
             if mismatch:
                 print("⚠️  数据库记录与实际向量数不一致:")
                 for filename, expected, actual in mismatch:
-                    print(f"    {filename}: db={expected} chroma={actual}")
+                    print(f"    {filename}: db={expected} vector_db={actual}")
             else:
                 print("✅ 数据库记录与实际向量数一致")
 

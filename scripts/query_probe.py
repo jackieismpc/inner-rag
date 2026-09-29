@@ -19,7 +19,7 @@ from inner_rag.services.vector_store import Strategy, vector_service
 async def probe(
     kb_id: int, query: str, k: int, strategy: Strategy, threshold: float | None
 ) -> None:
-    results, filtered_out = await vector_service.similarity_search_async(
+    results, filtered_out = await vector_service.search(
         kb_id=kb_id, query=query, k=k, strategy=strategy, score_threshold=threshold
     )
 

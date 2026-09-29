@@ -52,6 +52,7 @@ g1() {
   mkdir -p "$GATE_TMP"
   export DATABASE_URL="sqlite:///$GATE_TMP/app.db" \
          UPLOAD_DIR="$GATE_TMP/uploads" \
+         ZVEC_PATH="$GATE_TMP/zvec" \
          CHROMA_PERSIST_DIR="$GATE_TMP/chroma" \
          LOG_DIR="$GATE_TMP/logs"
 
@@ -78,7 +79,7 @@ g1() {
   trap - EXIT
   ok "冒烟启动与 /api/system/health、/openapi.json 正常"
 
-  unset DATABASE_URL UPLOAD_DIR CHROMA_PERSIST_DIR LOG_DIR
+  unset DATABASE_URL UPLOAD_DIR ZVEC_PATH CHROMA_PERSIST_DIR LOG_DIR
 
   log "G1 · 变更留痕自检（AGENTS.md §1.1：本分支改动必须在 CHANGELOG.md 有条目）"
   local changed

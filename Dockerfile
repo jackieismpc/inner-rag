@@ -27,9 +27,10 @@ RUN uv sync --frozen --no-dev
 ENV HOST=0.0.0.0 \
     PORT=8010 \
     UPLOAD_DIR=/data/uploads \
+    ZVEC_PATH=/data/zvec_db \
     CHROMA_PERSIST_DIR=/data/chroma_db \
     LOG_DIR=/data/logs
-RUN mkdir -p /data/uploads /data/chroma_db /data/logs \
+RUN mkdir -p /data/uploads /data/zvec_db /data/chroma_db /data/logs \
     && chown -R app:app /data /app
 
 # 以非 root 身份运行；具名卷首次挂载时会继承 /data 的属主

@@ -66,6 +66,7 @@ def _offline_env(workdir: Path) -> None:
             "EMBEDDING_PROVIDER": "mock",
             "EMBEDDING_MAX_INPUT_CHARS": "0",
             "DATABASE_URL": f"sqlite:///{workdir}/bench.db",
+            "ZVEC_PATH": f"{workdir}/zvec",
             "CHROMA_PERSIST_DIR": f"{workdir}/chroma",
             "UPLOAD_DIR": f"{workdir}/uploads",
             "LOG_DIR": f"{workdir}/logs",
@@ -111,7 +112,7 @@ async def run_fixtures(
         )
         for fixture in fixtures
     ]
-    written = await vector_service.add_documents_async(
+    written = await vector_service.add_documents(
         kb_id=FIXTURE_KB_ID, documents=documents, doc_id=1, filename="fixtures"
     )
     print(f"[fixtures] 写入 {written} 个分块（{len(fixtures)} 段原文，mock embedding）")
@@ -119,7 +120,7 @@ async def run_fixtures(
     results: list[dict] = []
     for item in items:
         started = time.perf_counter()
-        hits, filtered_out = await vector_service.similarity_search_async(
+        hits, filtered_out = await vector_service.search(
             kb_id=FIXTURE_KB_ID,
             query=item["question"],
             k=args.k,
@@ -160,7 +161,7 @@ async def run_kb(args: argparse.Namespace, items: list[dict]) -> list[dict]:
     results: list[dict] = []
     for item in items:
         started = time.perf_counter()
-        hits, filtered_out = await vector_service.similarity_search_async(
+        hits, filtered_out = await vector_service.search(
             kb_id=args.kb_id,
             query=item["question"],
             k=args.k,

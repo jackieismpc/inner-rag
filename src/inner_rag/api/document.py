@@ -143,13 +143,13 @@ def get_doc(
 
 
 @router.delete("/{doc_id}", response_model=ResponseModel)
-def delete_doc(
+async def delete_doc(
     doc_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
     ensure_doc_access(db, doc_id, user, AccessLevel.WRITE)
-    doc_service.delete_document(db, doc_id)
+    await doc_service.delete_document(db, doc_id)
     return ResponseModel(message="删除成功")
 
 

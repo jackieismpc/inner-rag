@@ -18,6 +18,7 @@ from inner_rag.core.config import settings
 from inner_rag.core.database import SessionLocal
 from inner_rag.models import DocStatus, Document, KnowledgeBase
 from inner_rag.services.cache import query_cache
+from inner_rag.services.embedding import ensure_embedding_matches
 from inner_rag.services.parser import parser
 from inner_rag.services.vector_store import vector_service
 
@@ -90,13 +91,13 @@ class DocumentService:
 
         try:
             kb = db.get(KnowledgeBase, doc.kb_id)
-            vector_service.ensure_embedding_matches(doc.kb_id, kb.embedding_model if kb else None)
+            ensure_embedding_matches(doc.kb_id, kb.embedding_model if kb else None)
 
             if not doc.file_path:
                 msg = f"文档缺少服务端存储路径，无法解析: doc_id={doc.id}"
                 raise ValueError(msg)
             documents, meta = parser.parse(doc.file_path, doc.filename)
-            chunk_count = await vector_service.add_documents_async(
+            chunk_count = await vector_service.add_documents(
                 kb_id=doc.kb_id, documents=documents, doc_id=doc.id, filename=doc.filename
             )
 
@@ -197,13 +198,13 @@ class DocumentService:
 
     # ── 删除 ───────────────────────────────────────────────────────────
 
-    def delete_document(self, db: Session, doc_id: int) -> bool:
+    async def delete_document(self, db: Session, doc_id: int) -> bool:
         doc = db.get(Document, doc_id)
         if doc is None:
             return False
 
         kb_id = doc.kb_id
-        vector_service.delete_documents(kb_id, doc_id)
+        await vector_service.delete_document(kb_id, doc_id)
 
         if doc.file_path:
             Path(doc.file_path).unlink(missing_ok=True)

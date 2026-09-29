@@ -20,6 +20,25 @@ from inner_rag.providers import get_embeddings
 from inner_rag.services.cache import embedding_cache
 
 
+class EmbeddingIdentityMismatch(RuntimeError):
+    """知识库记录的 embedding 与当前配置不一致。"""
+
+
+def ensure_embedding_matches(kb_id: int, embedding_model: str | None) -> None:
+    """校验知识库的向量空间与当前 embedding 配置一致，避免静默检索到无意义的向量。
+
+    向量空间一致性是 embedding 身份的属性，不是某个向量库后端的属性：换 provider / 模型后，
+    同一个库里的新旧向量不能混着检索（命中会是噪声，而不是报错）。
+    """
+    if embedding_model and embedding_model != settings.embedding_key:
+        msg = (
+            f"知识库 kb={kb_id} 建库时使用 {embedding_model}，"
+            f"当前配置为 {settings.embedding_key}；"
+            "请切回原 embedding 模型，或执行 scripts/reindex_kb.py 重建索引"
+        )
+        raise EmbeddingIdentityMismatch(msg)
+
+
 def _cached_embed_documents(embeddings: Embeddings, texts: list[str]) -> list[list[float]]:
     """同步批量嵌入：逐条走缓存，只把未命中的文本发给模型。"""
     resolved: list[list[float] | None] = [embedding_cache.get_sync(text) for text in texts]

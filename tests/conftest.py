@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
 import os
 import tempfile
@@ -25,17 +26,20 @@ os.environ.update(
         "DATABASE_URL": f"sqlite:///{_TMP / 'test.db'}",
         "AUTO_CREATE_TABLES": "true",
         "UPLOAD_DIR": str(_TMP / "uploads"),
+        "ZVEC_PATH": str(_TMP / "zvec"),
         "CHROMA_PERSIST_DIR": str(_TMP / "chroma"),
         "LOG_DIR": str(_TMP / "logs"),
         "OCR_BACKEND": "none",
         "LOG_RETRIEVAL": "false",
         "LOG_PROMPT": "false",
-        # provider 配置必须与开发者本机的 .env 解耦（os.environ 优先于 .env）：
-        # 否则本地一把 provider 切到云端（或打开截断），「离线测试」就会随本机配置漂移，
-        # 甚至真的发出网络请求。需要其他 provider 的用例自行 monkeypatch settings。
+        # provider 与向量库配置必须与开发者本机的 .env 解耦（os.environ 优先于 .env）：
+        # 否则本地把 provider 切到云端（或打开截断）、把 VECTOR_STORE 换成别的后端，
+        # 「离线测试」就会随本机配置漂移，甚至真的发出网络请求。
+        # 需要其他 provider / 后端的用例自行 monkeypatch settings。
         "LLM_PROVIDER": "mock",
         "EMBEDDING_PROVIDER": "mock",
         "EMBEDDING_MAX_INPUT_CHARS": "0",
+        "VECTOR_STORE": "zvec",
     }
 )
 
@@ -219,7 +223,8 @@ def kb(client: TestClient) -> Iterator[dict]:
     assert response.status_code == 200, response.text
     data = response.json()["data"]
     yield data
-    vector_service.delete_kb(data["id"])
+    # 同步 fixture 没有事件循环可用，直接跑协程回收向量（此时循环未在运行）
+    asyncio.run(vector_service.delete_kb(data["id"]))
 
 
 @pytest.fixture

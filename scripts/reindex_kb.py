@@ -23,7 +23,7 @@ from inner_rag.services.vector_store import vector_service
 
 async def reindex(kb_id: int, keep_vectors: bool = False) -> int:
     if not keep_vectors:
-        vector_service.delete_kb(kb_id)
+        await vector_service.delete_kb(kb_id)
         logger.info(f"已清空知识库 {kb_id} 的旧向量")
 
     db = SessionLocal()
