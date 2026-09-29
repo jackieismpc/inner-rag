@@ -50,19 +50,19 @@
   写代码前先想清最优实现，注释写「为什么」而非「是什么」（细则见 `AGENTS.md`）。
 - **变更留痕**：每次 push 前必须更新 `CHANGELOG.md`（记录目的 / 方案 / 效果），细则见第 8 节与 `AGENTS.md`。
 
-## 2. 现状基线（Phase 0–3 已交付）
+## 2. 现状基线（Phase 0–4 已交付）
 
 已经具备（这是后续阶段的起点，不要重复造）：
 
 | 领域 | 现状 | 缺口 |
 | --- | --- | --- |
 | 模型后端 | `providers/` 抽象层：Chat `ollama / openrouter / deepseek / openai / mock`，Embedding `ollama / openrouter / openai / mock`；实例缓存、探活与模型发现、`ProviderError` → 503 | 插件注册是硬编码分支（`specs._build` + `chat.build_chat_model`），第三方扩展要改源码 |
-| 向量库 | **zvec 为项目选型**（Alibaba 开源嵌入式向量库，见第 9 节 ADR）；当前代码用 ChromaDB 持久化，按知识库分 collection，cosine 空间，三策略检索（similarity / mmr / hybrid），真实相关度 | 没有 `VectorStore` 接口，服务层直接依赖 `langchain-chroma`，换库要改 `services/vector_store.py`；zvec 适配器待 Phase 4 落地。注意 `hybrid` 策略目前是 `similarity + MMR`，**不是稠密 + 稀疏（BM25）**，命名待澄清 |
+| 向量库 | **zvec 已是默认后端**（Alibaba 开源嵌入式向量库，见第 9 节 ADR）：按知识库分 collection、cosine 空间、三策略检索（similarity / mmr / hybrid）、真实相关度；`VectorStore` 契约在 `services/vector_store/base.py`，chroma 保留为兼容实现 | 存量 Chroma 库需用 `scripts/reindex_kb.py` 重建到 zvec；内嵌 zvec 单进程写（见风险登记簿）。注意 `hybrid` 策略目前是 `similarity + MMR`，**不是稠密 + 稀疏（BM25）**，命名待澄清 |
 | 关系库 | SQLAlchemy 2.1 + Alembic；SQLite（开发默认，WAL + 外键 + 等锁超时）与 PostgreSQL 共用一套迁移 | 服务层直接写 ORM/会话，没有 repository 边界；无 MySQL 等第三方方言验证 |
 | 缓存 | 进程内 LRU（query cache 按 kb 精确失效 + embedding cache 按 `provider:model` 隔离） | 多 worker 下失效；没有 Redis 等外部后端 |
 | 后台任务 | FastAPI `BackgroundTasks` 解析入库 | 无队列、无重试、无进度、无并发上限 |
 | 可观测 | loguru 文本日志（`logs/app.log`）、检索日志与 Prompt 统计（`/api/system/stats`） | 无 request_id、无结构化字段、无 tracing、无指标端点；跨步骤耗时无法归因 |
-| 测试 | 128 个离线用例（含 `tests/test_auth.py` 的身份 / ACL 用例与 `benchmark/` 的 15 个指标单测）+ 5 个 `-m live` 联网用例；离线用例强制 mock provider | 无 LLM-as-judge、无真实小库基线；`docs/samples/acceptance.txt` 只验证链路通不通 |
+| 测试 | 139 个离线用例（含 `tests/test_auth.py` 的身份 / ACL 用例、`tests/test_vector_store.py` 的参数化契约用例与 `benchmark/` 的 15 个指标单测）+ 5 个 `-m live` 联网用例；离线用例强制 mock provider | 无 LLM-as-judge、无真实小库基线；`docs/samples/acceptance.txt` 只验证链路通不通 |
 | 评测 | 评测集、离线 fixture、基准脚本已入库（`docs/datasets/dragon_king/`、`benchmark/`） | 真实小库/全库评测依赖本地 PDF 与 provider Key，尚未跑出正式基线 |
 | 交付 | Dockerfile + compose（PostgreSQL 16 / 后端镜像）、Alembic、README | 镜像与 PG 路径未实测；无 CI |
 
@@ -157,23 +157,37 @@ flowchart TB
 `/api/system/health` 免鉴权且不 5xx。验证方式：`./scripts/gates.sh g1` 全绿
 （ruff / mypy 42 文件 / 128 个离线用例 / 迁移 upgrade→check→downgrade→upgrade / 冒烟探活 + openapi / changelog 与密钥自检）。
 
-### Phase 4 — 向量库统一到 zvec
+### Phase 4 — 向量库统一到 zvec | ✅ 已完成
 
 **目标**：开发与生产都用 zvec，消除「在 Chroma 上写、以后在 zvec 上重验」的重复成本。
 
-**主要改动**
-- 抽出 `VectorStore` 接口（`add_documents / search / delete_kb / delete_document / count`），
-  语义按 `docs/architecture.md` 3.2 节定义（相关度换算、MMR 无分数、阈值过滤计数、元数据标量）；
-- 实现 **zvec 适配器**（Alibaba 开源嵌入式向量库：进程内、零外部服务、HNSW + cosine、WAL 持久化，
-  按可选 extra 安装并锁版本）；
-- `services/vector_store.py` 改为按 `VECTOR_STORE=zvec|chroma` 查表构造（Chroma 保留为兼容实现，
-  跑同一套契约测试）；迁移方式：新建 zvec 库 + 重跑建库，不做原地格式转换；
-- 用同一份评测集对比迁移前后指标（评测基线在 Phase 6 产出前，可先用 `benchmark --mode fixtures` 验证逻辑）。
+**实际交付**（as-built；契约与实现细节见 `docs/architecture.md` 3.2）
+- 依赖与配置：`zvec==0.7.0` **锁版本进必装依赖**（上游 0.x 迭代快，升级要单独提交并重跑契约测试）；
+  Chroma 暂时保留为必装依赖（兼容后端），待不再需要对比时再降为 optional extra。新增 `VECTOR_STORE`
+  （默认 `zvec`）与 `ZVEC_PATH`；`CHROMA_*` 标注为「仅 `VECTOR_STORE=chroma` 时生效」。
+- 拆包 `services/vector_store/`：`base.py`（`VectorStore` 契约、相关度换算、分块元数据白名单、MMR 常量）、
+  `zvec_store.py`、`chroma_store.py`（原实现迁移）、`__init__.py`（`build_vector_store` 工厂 + `vector_service`
+  单例）。业务层仍 `from inner_rag.services.vector_store import vector_service`，换后端不改调用点。
+- `VectorStore` 接口：`add_documents / search / delete_kb / delete_document / count`，并把两个诊断方法
+  （`count_chunks_by_filename` / `list_doc_ids`）一并纳入契约；语义按 `docs/architecture.md` 3.2 定义
+  （相关度换算、MMR 无分数、阈值过滤计数、元数据白名单）。
+- embedding 身份校验迁到 `services/embedding.py::ensure_embedding_matches`：向量空间一致性属于 embedding
+  身份，不是某个向量库后端的属性。
+- zvec 适配器（Alibaba 开源嵌入式向量库：进程内、零外部服务、HNSW + cosine、WAL 持久化）：schema 在
+  首次写入时按向量维度懒建、分块 id 用 `kb-doc-chunk` 且统一 `upsert`（重跑入库幂等）、正文显式存
+  `content` 字段（zvec 不保存原文）、MMR 由适配器自实现、`delete_kb` 用 `destroy()`；所有行为都来自
+  zvec 0.7.0 的实测结论（见模块 docstring，改动前重跑探针）。
+- 迁移方式：新建 zvec 库 + 重跑建库（`scripts/reindex_kb.py <kb_id>`），不做原地格式转换。
 
-**阶段测试**：`VectorStore` 契约测试（同一套测试参数化跑 zvec / chroma）；迁移后小库指标不回归。
+**阶段测试**：`tests/test_vector_store.py` 用同一份契约参数化跑 zvec / chroma（各自 tmp 目录），另补 zvec
+独有的幂等失效场景（同一文档重复入库不产生重复分块）。
 
-**DoD**：默认配置 `VECTOR_STORE=zvec` 能跑通「上传 → 检索 → 问答」全链路；zvec 适配器通过全部契约测试；
-接口层不泄漏 zvec 类型。
+**DoD（已验证）**：默认 `VECTOR_STORE=zvec` 跑通「上传 → 检索 → 问答」全链路；两套后端通过同一套契约测试；
+接口层不泄漏 zvec 类型。验证方式：`./scripts/gates.sh g1` 全绿；`--mode fixtures` 下两后端指标一致
+（Recall@8 50.0% / MRR 0.500 / 页命中率 43.8%），zvec 检索延迟更低（p50 1.8ms vs chroma 3.5ms）。
+
+**明确不做**：不写 LangChain 集成层、不做格式转换 / 双写 / 灰度切换、不做远程向量服务化、
+不在本阶段加 `page_start` / `page_end`（留给 Phase 6）。
 
 ### Phase 5 — 可观测性：LangSmith 追踪 + 运行日志 + 指标（原 Phase 3）
 
@@ -346,6 +360,7 @@ uv run pytest -q
 rm -rf /tmp/ir-gate && mkdir -p /tmp/ir-gate
 export DATABASE_URL="sqlite:////tmp/ir-gate/app.db" \
        UPLOAD_DIR=/tmp/ir-gate/uploads \
+       ZVEC_PATH=/tmp/ir-gate/zvec \
        CHROMA_PERSIST_DIR=/tmp/ir-gate/chroma \
        LOG_DIR=/tmp/ir-gate/logs
 uv run alembic upgrade head
@@ -408,7 +423,7 @@ README 基准表对比：
 | 里程碑 | 内容 | 完成证据 |
 | --- | --- | --- |
 | M0 权限 | Phase 3 ✅ | 两个用户互相看不到对方知识库；跨库 403、未登录 401 的用例（`tests/test_auth.py`） |
-| M1 向量库统一 | Phase 4 | `VECTOR_STORE=zvec` 跑通全链路 + 契约测试全绿 + 迁移后指标不回归 |
+| M1 向量库统一 | Phase 4 ✅ | `VECTOR_STORE=zvec` 跑通全链路 + 契约测试参数化跑两后端全绿 + `--mode fixtures` 两后端指标一致（见 Phase 4 DoD） |
 | M2 可观测 | Phase 5 | LangSmith trace 链接 + 一次请求的 request_id 日志串联 + `metrics` 输出 |
 | M3 可评估 | Phase 6 | `docs/reports/eval-*.md` 报告 + 基线表 + 评测脚本离线单测 |
 | M4 可插拔 | Phase 7 | provider / 关系库 / 缓存 / 队列的契约测试 CI 记录 + 扩展指南与演练记录 |
@@ -428,8 +443,10 @@ README 基准表对比：
 | LangSmith 不可达或 Key 缺失 | 请求失败或延迟上升 | tracing 默认关闭、失败只告警不抛出；`LANGSMITH_TRACING=false` 时零网络调用（有测试保证） |
 | 追踪/日志泄露敏感内容 | 合规风险 | 生产 `LOG_PROMPT=false`；trace 只记元数据与统计，正文按开关脱敏；免费路由数据留存风险在 README 说明 |
 | 抽象层改造成回归 | 功能退化 | 每个插件点先补契约测试再抽接口；G1/G3 双门禁；小步提交 |
-| 向量库从 Chroma 迁到 zvec | 存量知识库需重建；行为差异可能改变召回 | 先补 `VectorStore` 契约测试再实现 zvec adapter；迁移用「重跑建库 + 小库指标对比」，不回归才切默认；Chroma 实现保留一个版本可回退 |
-| zvec 上游仍在快速迭代 | SDK/接口变更 | 依赖走可选 extra 并锁版本；适配器只实现在 `VectorStore` 内部，接口层不泄漏 zvec 类型 |
+| 向量库从 Chroma 迁到 zvec | 存量知识库需重建；行为差异可能改变召回 | 已按此执行：先补 `VectorStore` 契约测试再实现 zvec 适配器；迁移用「重跑建库」`scripts/reindex_kb.py`；`--mode fixtures` 两后端指标一致后才切默认；Chroma 实现保留可回退 |
+| zvec 上游仍在快速迭代 | SDK/接口变更 | 依赖锁死版本（`zvec==0.7.0`，必装）；升级必须单独提交并重跑契约测试；适配器只实现在 `VectorStore` 内部，接口层不泄漏 zvec 类型。Chroma 暂留必装以便对比，后续再降为 optional extra |
+| 内嵌 zvec 的写锁按 collection 目录独占、跨进程互斥 | 多 worker / 多实例部署时第二个进程打不开库（读写都会失败） | 内嵌模式明确单进程部署（不用 `uvicorn --workers`、不横向扩副本），README 部署章节写明；需要多副本时改用远程向量服务（Phase 10 视情况） |
+| 分块元数据白名单收窄（解析器附带字段不再进向量库） | 依赖 `source` / `sheet` / `ocr` 元数据的下游（或旧库里已有这些字段）会出现取值变化 | 白名单集中在 `base.CHUNK_METADATA_FIELDS`；下游实际只消费 `filename` / `page` / `doc_id` / `chunk_index`（`services/rag.py` + `chunk_key`），已在 `docs/architecture.md` 3.2 写明；旧 Chroma 库需重建以对齐 schema |
 | 本机无 Node/npm、无 docker socket 权限、无 `uidmap`（rootless 容器运行时必需） | 前端构建与镜像无法本地验证 | 前端：已用官方 tarball 把 Node LTS 装到 `~/.local/node`（无需 sudo），`npm install && npm run build` 已实测通过。镜像：conda 装 podman 5.8.3 后，用「只替换三处环境不可行点」的本地变体 Dockerfile 实测通过——`uv sync --frozen` 冻结安装 129 个包、容器内 `alembic upgrade head` + `/api/system/health` 返回 200；但仓库 Dockerfile 的 apt 沙箱降权、`useradd --uid 10001`、`chown app:app`（以及非 root 运行的 `USER app`）在单 ID 映射下无法执行（rootless 需 setuid root 的 `newuidmap`，仅管理员可装），逐字节验证留给 Phase 10 的 CI |
 | SQLite 并发写入 | `database is locked` | 已开 WAL + `busy_timeout`；上传并发受限；需要并发就切 PostgreSQL（Phase 10 实测） |
 | 权限改造范围蔓延 | 拖慢主线、复杂度上升 | Phase 3 明确只做「单租户 + 本地登录 + 知识库级 ACL」，多租户 / SSO / 审计不做 |

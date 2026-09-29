@@ -17,14 +17,15 @@
 
 不设用例数量目标；README 里的用例数只是**现状快照**，不是 KPI。
 
-现状（Phase 0–3，用例数是快照不是目标）：
+现状（Phase 0–4，用例数是快照不是目标）：
 
 - `pyproject.toml` 里 `addopts = "-m 'not live'"`，即**默认只跑离线用例**；
 - `markers` 已注册 `live`；`live` 用例必须显式 `-m live` 才执行；
 - `tests/conftest.py` 强制把 `LLM_PROVIDER` / `EMBEDDING_PROVIDER` 钉成 `mock` 并设置
   `EMBEDDING_MAX_INPUT_CHARS`，保证**不受开发者本机 `.env` 影响**；
-- 用例数快照：**128 个离线用例**（Phase 3 后），其中登录 / 鉴权 / ACL 在 `tests/test_auth.py`
+- 用例数快照：**139 个离线用例**（Phase 4 后），其中登录 / 鉴权 / ACL 在 `tests/test_auth.py`
   （多为参数化路由表，例如「11 条受保护路由全部 401」是一条用例的参数化而不是 11 条用例）；
+  向量库契约在 `tests/test_vector_store.py`（`store` fixture 参数化跑 zvec / chroma，同一份用例覆盖两个实现）；
 - 测试库与向量库都用临时目录，不写 `./data`；跑完即清理；
 - `benchmark/` 的指标与评测集校验也有离线用例（`tests/test_benchmark_metrics.py`）；
   `--mode fixtures` 的评测自检不在 pytest 里，要单独跑（见第 6 节）。
@@ -39,7 +40,7 @@ tests/
 ├── test_cache.py            # L1/L2：query 与 embedding 缓存语义与失效
 ├── test_parser.py           # L1/L2：解析与 OCR 后端行为
 ├── test_providers.py        # L1：spec 解析、错误文案、健康检查状态机
-├── test_vector_store.py     # L1/L2：写入、检索策略、阈值、相关度换算
+├── test_vector_store.py     # L1/L2：写入、检索策略、阈值、相关度换算（参数化跑 zvec / chroma）
 ├── test_benchmark_metrics.py # L1/L4：基准指标算法、评测集 schema 与锚点校验
 ├── test_live_providers.py   # L3：真实联网（-m live）
 └── contracts/               # Phase 7：插件点契约测试（参数化跑所有实现）
@@ -59,7 +60,7 @@ tests/
 
 - **环境隔离**：`conftest.py` 的 `Settings` 覆盖必须在 import `inner_rag` 之前生效，否则
   `settings` 单例已经读走 `.env`；
-- **临时资源**：SQLite 用临时文件、Chroma 用临时目录、上传目录用 `tmp_path`，
+- **临时资源**：SQLite 用临时文件、向量库（zvec / Chroma）与上传目录用 `tmp_path`，
   绝不共用 `./data`；
 - **假 provider**：`LLM_PROVIDER=mock` / `EMBEDDING_PROVIDER=mock`（确定性哈希词袋向量），
   断言只依赖「词面相似」这种可控特性；

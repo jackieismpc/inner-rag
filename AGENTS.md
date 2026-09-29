@@ -61,7 +61,7 @@
 - **注释写「为什么」，不写「是什么」**——代码本身已经说明「是什么」。
 - 公共模块 / 类 / 函数必须有 docstring，至少说清：**职责、输入输出契约、失败时抛什么、与哪些层交互**。
 - 出现**非直觉的取舍**（性能、兼容、绕开上游 bug、上游库行为反直觉）时，**必须写明原因**，否则后人会「顺手改错」。
-  （示例：`services/vector_store.py` 里解释为什么不用 `similarity_search_with_relevance_scores`。）
+  （示例：`services/vector_store/base.py` 里解释为什么不用 `similarity_search_with_relevance_scores`。）
 - 禁止：空 `TODO`、调试残留、被注释掉的死代码、「临时这么写」。
 - 命名用**领域语言**（`kb` / `doc` / `chunk` / `identity` / `strategy`），禁止 `a` / `b` / `tmp` / `data1` / `flag2`。
 

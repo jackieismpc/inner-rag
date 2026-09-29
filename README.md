@@ -25,7 +25,7 @@
 - **性能与成本控制**：Embedding 缓存（按 `provider:model` 隔离）+ 检索缓存（LRU + TTL，按库精确失效）、
   批量嵌入 + 信号量限流、模型实例在工厂内复用
 - **可观测与工程化**：检索 / Prompt 日志与缓存命中率、空召回率、延迟统计；uv 锁依赖、Alembic 迁移、
-  生产环境拒绝用默认 / 过短的 JWT 密钥启动、ruff + mypy、128 个离线 pytest 用例（另 5 个联网验收）、
+  生产环境拒绝用默认 / 过短的 JWT 密钥启动、ruff + mypy、139 个离线 pytest 用例（另 5 个联网验收）、
   Dockerfile + docker compose
 
 ## 架构
@@ -72,17 +72,18 @@ flowchart LR
 | 语言 / 包管理 | Python 3.13（uv 管理）、`uv.lock` 锁定依赖 |
 | Web 框架 | FastAPI 0.141+、Uvicorn 0.54+、SSE 流式响应 |
 | LLM 编排 | LangChain 1.x（`langchain-core` 1.6+、`langchain-text-splitters`）+ `langchain-ollama`（本地）/ `langchain-openai`（OpenAI 兼容云端）/ `langchain-deepseek`（DeepSeek 官方集成） |
-| 向量库 | **zvec**（Alibaba 开源、嵌入式、HNSW + cosine，本项目选型）；当前代码仍为 ChromaDB 1.5+（persistent client）/ `langchain-chroma`，按 Phase 4 迁移 |
+| 向量库 | **zvec 0.7.0**（Alibaba 开源、嵌入式、HNSW + cosine，默认后端，锁版本）；ChromaDB 1.5+ / `langchain-chroma` 保留为兼容后端（`VECTOR_STORE=chroma`） |
 | 关系库 | SQLite（开发默认）+ PostgreSQL 16（部署可选）+ SQLAlchemy 2.1 + Alembic 1.20 |
 | 认证与权限 | JWT（PyJWT，HS256）+ argon2id 口令哈希（argon2-cffi）+ 知识库级 ACL（owner / member） |
 | 文档解析 | pypdf、PyMuPDF、python-docx、docx2txt、openpyxl、xlrd、Pillow、chardet |
 | 前端 | Vue 3 + Vite + Pinia + Tailwind CSS 3 |
 | 质量 | ruff、pytest（+ pytest-asyncio）、mypy |
 
-> **向量库选型**：本项目明确选用 **zvec**（[Alibaba 开源](https://github.com/alibaba/zvec)的嵌入式向量库，
-> Apache-2.0，定位「向量库里的 SQLite」：进程内嵌入、无需独立服务、HNSW + cosine、WAL 持久化、支持多进程并发读），
-> 理由是「零运维」，与 SQLite 单文件开发模型一致。当前代码落盘用的仍是 ChromaDB，两者受同一个 `VectorStore`
-> 契约约束（见 `docs/architecture.md` 3.2），迁移步骤与验收标准见 `docs/DEVELOPMENT_PLAN.md`（Phase 4）。
+> **向量库选型**：本项目选用 **zvec**（[Alibaba 开源](https://github.com/alibaba/zvec)的嵌入式向量库，
+> Apache-2.0，定位「向量库里的 SQLite」：进程内嵌入、无需独立服务、HNSW + cosine、WAL 持久化），
+> 理由是「零运维」，与 SQLite 单文件开发模型一致。Phase 4 起 zvec 已是默认后端（`VECTOR_STORE=zvec`），
+> ChromaDB 保留为兼容实现；两者受同一个 `VectorStore` 契约约束并跑同一套契约测试（见 `docs/architecture.md` 3.2）。
+> 注意内嵌 zvec 按 collection 目录独占写锁，**必须单进程部署**（不要 `uvicorn --workers`）。
 
 ## 快速开始
 
@@ -270,6 +271,8 @@ TOKEN=$(curl -s -X POST localhost:8010/api/auth/login \
 | `LLM_PROVIDER` / `EMBEDDING_PROVIDER` | `ollama` | 两个**独立**开关；向量侧没有 `deepseek`（官方无 embeddings 接口） |
 | `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | 空 | 云端 API 密钥，只写在 `.env`，不要提交 |
 | `EMBEDDING_MAX_INPUT_CHARS` | `0` | 单条输入的字符上限（0 = 不截断）；小上下文模型建议设 `400` |
+| `VECTOR_STORE` | `zvec` | 向量库后端：`zvec`（嵌入式，默认）/ `chroma`（兼容旧数据）；切换后用 `scripts/reindex_kb.py <kb_id>` 重建 |
+| `ZVEC_PATH` | `./data/zvec_db` | zvec 数据目录，每知识库一个 `kb_<id>/` collection；写锁目录独占，**单进程部署** |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `200` | 分块参数，影响召回粒度；改动后建议重建索引并跑基准 |
 | `RETRIEVAL_SCORE_THRESHOLD` | `0.3` | 相关度阈值（`1 - 余弦距离`）；过高会导致空召回 |
 | `AUTO_CREATE_TABLES` | `false` | 表结构交给 Alembic；仅测试/一次性库设为 `true` |
@@ -299,7 +302,7 @@ inner-rag/
 │   ├── schemas/              # Pydantic 请求/响应模型
 │   ├── api/                  # 路由：auth / kb / document / chat / system + 鉴权依赖（deps.py）
 │   ├── providers/            # 模型后端抽象：specs / chat / embeddings / factory（多 provider）
-│   └── services/             # parser、ocr、embedding、vector_store、rag、cache、retrieval_log
+│   └── services/             # parser、ocr、embedding、vector_store/（base + zvec/chroma 适配 + 工厂）、rag、cache、retrieval_log
 ├── scripts/                  # 运维与排查脚本（含建号 create_user.py）+ start.sh
 ├── tests/                    # 离线 pytest 用例 + 可选的真实 API 联网验收（-m live）
 ├── benchmark/                # 基准脚本：指标、评测集运行、结果落盘、README 基准表维护
@@ -439,10 +442,15 @@ docker compose --profile app up -d --build
 docker compose logs -f api
 ```
 
-后端容器对外暴露 `8010`，以非 root 用户（uid 10001）运行；数据（上传文件、Chroma、日志）
+后端容器对外暴露 `8010`，以非 root 用户（uid 10001）运行；数据（上传文件、zvec 向量库、日志）
 落在 `app_data` 卷的 `/data` 下（若改为绑定宿主机目录，注意该目录需允许 uid 10001 写入）。
 镜像里的 `OLLAMA_BASE_URL` 默认指向 `host.docker.internal:11434`（Compose 已加 `extra_hosts`），
 如需指向云端 API，直接在 `.env` 或 Compose 环境变量里覆盖。
+
+> **单进程部署**：zvec 内嵌模式的写锁按 collection 目录独占、跨进程互斥，因此**不要**用
+> `uvicorn --workers N`，也不要让多个副本共享同一份 `/data`（第二个进程会打不开向量库）。需要横向扩容
+> 时应改为远程向量服务（Phase 10 视情况）。从 Chroma 切到 zvec、改分块参数或换 embedding 模型后，
+> 用 `uv run scripts/reindex_kb.py <kb_id>` 重建索引，不做原地格式转换。
 
 镜像构建状态：Dockerfile 的依赖安装与启动链路已在本机用 podman（无 sudo）实测通过——
 按 `uv.lock` 冻结安装 129 个包，容器内 `alembic upgrade head` 与 `/api/system/health`（200）均正常。
@@ -491,9 +499,11 @@ A：没有注册与找回入口（企业内部账号由管理员发放）：`uv 
 - **已完成**：多 Provider 抽象层（Chat / Embedding 独立选型、OpenRouter / DeepSeek 官方集成、`mock`
   降级路径、`/api/system/providers`）、SQLite 优先与密钥外置、Alembic 迁移、Docker 资产；
   身份与访问控制（Phase 3）——本地账号 + JWT 登录、argon2id 口令哈希、知识库级 ACL（owner / 只读 /
-  可写）、前端登录页与按权限渲染、`scripts/create_user.py` 建号
+  可写）、前端登录页与按权限渲染、`scripts/create_user.py` 建号；
+  向量库统一到 zvec（Phase 4）——`VectorStore` 契约 + zvec 默认后端 + Chroma 兼容实现，
+  同一套契约测试参数化跑两个后端
 - **进行中**：开发文档体系（`docs/DEVELOPMENT_PLAN.md` 及其子文档）、龙族真实评测集与 `benchmark/` 指标脚本
-- **Phase 4–10**：向量库统一到 zvec → 可观测性
+- **Phase 5–10**：可观测性
   （LangSmith 追踪 + 运行日志与指标）→ 评测体系与准确性基线 → 可插拔深化
   （provider 注册表、关系库 / 缓存 / 队列抽象）→ 用评测集驱动检索与回答质量提升 →
   OCR / VLM 文档面扩展 → 交付（Docker / PostgreSQL / CI）

@@ -24,6 +24,48 @@
 
 ---
 
+## [Phase 4] 2026-09-29 — 向量库统一到 zvec：VectorStore 契约 + 默认后端切换
+
+- 类型：新增功能
+- 目的：项目的向量库选型是 zvec（ADR 见 `docs/DEVELOPMENT_PLAN.md` 第 9 节），但代码一直落在 ChromaDB 上——
+  「在 Chroma 上写、以后再在 zvec 上重验」意味着分块、阈值、MMR、删除语义都要做两遍，越晚迁移返工越大。
+  本阶段把向量能力统一到 zvec，并在切换之前先抽出 `VectorStore` 契约，让两个后端跑同一套契约测试。
+- 方案：
+  - 配置与依赖：`zvec==0.7.0` 锁版本进必装依赖（上游 0.x 迭代快，升级要单独提交并重跑契约测试）；
+    Chroma 暂时保留为必装依赖（兼容后端）。新增 `VECTOR_STORE`（默认 `zvec`）与 `ZVEC_PATH`，
+    `CHROMA_*` 标注为「仅 `VECTOR_STORE=chroma` 时生效」；Dockerfile 的 `/data` 卷同步加 `ZVEC_PATH`。
+  - 拆包 `services/vector_store/`：`base.py`（契约 + 相关度换算 + 分块元数据白名单 + MMR 常量）、
+    `zvec_store.py`、`chroma_store.py`（原实现迁移）、`__init__.py`（`build_vector_store` 工厂 +
+    `vector_service` 单例）。业务层 import 路径不变，换后端不改调用点。
+  - 契约方法：`add_documents / search / delete_kb / delete_document / count`，并把两个诊断方法
+    （`count_chunks_by_filename` / `list_doc_ids`）纳入契约；语义（相关度 `1 - distance`、MMR 无分数、
+    阈值过滤计数、元数据白名单、写入幂等边界）写在 `docs/architecture.md` 3.2。
+  - zvec 适配器按 zvec 0.7.0 的**实测行为**实现（先用探针脚本跑通再写代码）：schema 在首次写入时按向量维度
+    懒建；分块 id 用 `kb-doc-chunk` 且统一 `upsert`（`insert` 撞 id 只返回错误码）→ 重跑入库幂等；
+    正文显式存 `content` 字段（zvec 不保存原文）；MMR 由适配器自实现；`delete_document` 先数后
+    `delete_by_filter`；`delete_kb` 用 `destroy()`；写操作只在返回值里报错，统一 `_ensure_ok` 显性化失败。
+  - embedding 身份校验迁到 `services/embedding.py::ensure_embedding_matches`（向量空间一致性属于 embedding
+    身份，不是某个向量库后端的属性）；`DocumentService.delete_document`、`api/kb.delete_kb`、
+    `api/document.delete_doc` 随之改为 `async`。
+  - 迁移方式：不做原地格式转换，新建 zvec 库 + 重跑建库（`scripts/reindex_kb.py <kb_id>`）。
+- 效果：
+  - `uv run pytest -q` → **139 passed, 5 deselected**（Phase 3 为 128）：新增 `tests/test_vector_store.py` 用
+    `store` fixture 参数化跑 zvec / chroma 的同一份契约，另补 zvec 独有的幂等失效场景；`tests/conftest.py`
+    固定 `VECTOR_STORE=zvec` 与 `ZVEC_PATH`，测试不受本机 `.env` 影响。
+  - `uv run mypy` → Success: no issues found in **45 source files**；`uv run ruff check .` 全绿。
+  - 默认 `VECTOR_STORE=zvec` 跑通「上传 → 检索 → 问答」全链路（`tests/test_api.py` 的 chat / SSE 用例）；
+    `uv run python -m benchmark.run_bench --mode fixtures` 两后端指标**完全一致**
+    （Recall@8 50.0% / MRR 0.500 / 页命中率 43.8%），zvec 更快（检索 p50 1.8ms vs chroma 3.5ms，
+    p95 3.2ms vs 7.3ms）。
+  - `./scripts/gates.sh g1` 全绿（ruff / mypy 45 文件 / 139 离线用例 / 迁移 upgrade→check→downgrade→upgrade /
+    冒烟探活 + openapi / changelog 与密钥自检）。
+  - 已知限制（已记入风险登记簿）：内嵌 zvec 的写锁按 collection 目录独占、跨进程互斥 → 必须**单进程部署**，
+    不要 `uvicorn --workers`（README 部署章节已写明）；分块元数据收窄为白名单（解析器附带的
+    `source` / `sheet` / `ocr` 不再进向量库），旧 Chroma 库需重建以对齐 schema。
+- 涉及提交：本次提交（配置与依赖、拆包与适配器、调用点改名、契约测试、文档与 README/.env.example 同步）
+
+---
+
 ## [Phase 3] 2026-09-28 — 容器镜像构建：本机验证依赖安装与启动链路（真实 Dockerfile 仍待 CI）
 
 - 类型：文档

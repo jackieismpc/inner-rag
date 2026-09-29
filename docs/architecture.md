@@ -20,8 +20,8 @@ src/inner_rag/
 │   ├── parser.py      #   文本抽取（PDF / DOCX / TXT / MD …）
 │   ├── ocr.py         #   扫描件 / 图片文字识别（可插拔后端）
 │   ├── document.py    #   解析 → 分块 → 入库的编排与状态机
-│   ├── embedding.py   #   embedding 门面 + 缓存 + identity
-│   ├── vector_store.py#   向量写入与检索（Chroma 适配）
+│   ├── embedding.py   #   embedding 门面 + 缓存 + identity（含向量空间一致性校验）
+│   ├── vector_store/  #   向量库插件点：base 契约 + zvec（默认）/ chroma 适配 + 工厂
 │   ├── cache.py       #   查询缓存 / 嵌入缓存（LRU）
 │   ├── rag.py         #   检索 → Prompt 组装 → LLM 生成（含流式）
 │   └── retrieval_log.py # 检索与 Prompt 统计
@@ -63,7 +63,7 @@ api  →  services  →  providers / core
 | --- | --- | --- | --- | --- | --- |
 | Chat 模型 | `providers/factory.py::get_chat_model` | ollama / openrouter / deepseek / openai / mock | `LLM_PROVIDER`、`*_CHAT_MODEL`、`*_API_KEY`、`LLM_REASONING_EFFORT` | `chat_health()` → `/api/system/health` | `tests/test_providers.py` |
 | Embedding 模型 | `providers/factory.py::get_embeddings` | ollama / openrouter / openai / mock | `EMBEDDING_PROVIDER`、`*_EMBEDDING_MODEL`、`EMBEDDING_MAX_INPUT_CHARS` | `providers_catalog()` → `/api/system/providers` | `tests/test_providers.py` |
-| 向量库 | `services/vector_store.py::VectorStoreService`（Phase 4 抽出 `VectorStore`） | **zvec**（Alibaba 开源嵌入式向量库，目标实现，Phase 4 迁移）；当前实现为 ChromaDB（cosine，每库一 collection） | `CHROMA_PERSIST_DIR`（当前）/ `ZVEC_PATH`（Phase 4）、`CHUNK_SIZE`、`CHUNK_OVERLAP` | 建库时 `get_store()` 探活 | `tests/test_vector_store.py` |
+| 向量库 | `services/vector_store/`（`base.VectorStore` 契约 + `build_vector_store` 工厂） | **zvec**（默认，Alibaba 开源嵌入式向量库）；chroma 兼容实现（cosine，每库一 collection） | `VECTOR_STORE`、`ZVEC_PATH`、`CHROMA_*`（仅 chroma）、`CHUNK_SIZE`、`CHUNK_OVERLAP` | `count(kb_id)` 与关系库对账（`scripts/check_vectors.py`）+ 冒烟链路上的上传 → 检索 | `tests/test_vector_store.py`（同一份契约参数化跑两个后端） |
 | 关系库 | `core/database.py` + Alembic | SQLite（默认）/ PostgreSQL | `DATABASE_URL` | `lifespan` 里 `check_database()` | `tests/test_api.py` |
 | 缓存 | `services/cache.py` | 进程内 LRU（query + embedding 两套） | `CACHE_*`、`EMBEDDING_CACHE_SIZE` | 无（进程内） | `tests/test_cache.py` |
 | 后台任务 | FastAPI `BackgroundTasks` | 进程内 | — | 文档状态机可观测 | `tests/test_api.py` |
@@ -86,8 +86,9 @@ api  →  services  →  providers / core
 - `_build(kind, name)` 把 `.env` 翻成 spec；`chat_spec()` / `embedding_spec()` 负责**解析 + 校验**；
 - 校验失败抛 `ProviderError`，消息里直接写明「改哪个变量」；
 - `ProviderSpec.identity` = `provider:model`，写进知识库，用于**向量空间一致性**校验
-  （`VectorStoreService.ensure_embedding_matches`，不一致会抛 `EmbeddingIdentityMismatch` 并提示
-  `scripts/reindex_kb.py`）。
+  （`services/embedding.py::ensure_embedding_matches`，不一致会抛 `EmbeddingIdentityMismatch` 并提示
+  `scripts/reindex_kb.py`）。校验属于 embedding 身份而不是某个向量库后端：换向量库不改变向量空间，
+  换 provider / 模型才需要重建索引。
 
 Phase 7 目标形态（把「分支」换成「注册表」）：
 
@@ -113,49 +114,68 @@ def get_chat_builder(name: str) -> ChatBuilder: ...
 
 ### 3.2 向量库（`VectorStore`）
 
-**实现者**：zvec（Alibaba 开源嵌入式向量库，项目选型与目标实现，Phase 4 迁移）/ chroma（当前实现，
-迁移完成后降为兼容实现）。下面是 Phase 4 抽出的接口，语义按现有 Chroma 行为定义：
+**实现者**：zvec（Alibaba 开源嵌入式向量库，Phase 4 起为默认后端，`VECTOR_STORE=zvec`）/ chroma（迁移前的实现，
+保留为兼容后端，`VECTOR_STORE=chroma`）。代码在 `services/vector_store/`：`base.py`（契约与共用语义）、
+`zvec_store.py`、`chroma_store.py`、`__init__.py`（按配置构造的 `build_vector_store` 工厂 + `vector_service` 单例）。
+接口层只 import 包门面，不出现任何 zvec 类型。
 
 ```python
 class VectorStore(Protocol):
     async def add_documents(
-        self, kb_id: int, docs: list[Document], doc_id: int, filename: str
+        self, kb_id: int, documents: list[Document], doc_id: int, filename: str
     ) -> int: ...  # 返回写入分块数
     async def search(
         self,
         kb_id: int,
         query: str,
-        k: int,
-        strategy: Strategy,
-        score_threshold: float | None,
-        filter_doc_ids: list[int] | None,
+        k: int | None = None,
+        strategy: Strategy = "similarity",
+        score_threshold: float | None = None,
+        filter_doc_ids: list[int] | None = None,
     ) -> tuple[list[tuple[Document, float | None]], int]: ...  # (结果, 被滤掉数)
     async def delete_kb(self, kb_id: int) -> None: ...
     async def delete_document(self, kb_id: int, doc_id: int) -> int: ...
     def count(self, kb_id: int) -> int: ...
+    def count_chunks_by_filename(self, kb_id: int) -> dict[str, int]: ...  # 诊断：各文件分块数
+    def list_doc_ids(self, kb_id: int) -> list[str]: ...  # 诊断：发现删除后的残留向量
 ```
 
-必须遵守的语义（这也是契约测试要断言的）：
+必须遵守的语义（契约测试逐条断言，两个后端跑同一份 `tests/test_vector_store.py`）：
 
 - **相关度口径**：对外一律 `[0, 1]` 且越大越相关（cosine 下 `relevance = 1 - distance`），
   不允许把原始距离当相关度返回；
 - **MMR 无分数**：`strategy="mmr"` 的条目 `score=None`，不过阈值过滤，排序时排在有分数之后；
 - **阈值过滤计数**：被 `score_threshold` 滤掉的条数要返回，供指标统计「空召回率」；
-- **元数据是标量字符串**：`doc_id` / `kb_id` / `chunk_index` 存字符串，`page` 存数字，
-  Phase 6 起新增 `page_start` / `page_end`；
+- **元数据白名单**：只写 `base.CHUNK_METADATA_FIELDS`（`doc_id` / `kb_id` / `filename` / `chunk_index` /
+  `page`）。解析器附带的 `source` / `sheet` / `ocr` 不进向量库；`doc_id` / `kb_id` / `chunk_index` 存字符串、
+  `page` 存整数（没有页码就不写该字段）。这是 Phase 4 的行为变化：旧 Chroma 实现把解析器元数据原样写入，
+  两个后端的 schema 与返回值因此不再一致——白名单是唯一口径；
 - **写入幂等性边界**：同一文档重新向量化前必须先 `delete_document`，避免重复分块累积。
 
-zvec 适配器（Phase 4）要把上面这些语义映射到 zvec SDK，并逐条写进契约测试：
+两个后端的实现映射（as-built，细节见各自模块 docstring）：
 
-| 契约方法 | zvec 侧动作 | 实现要点 |
+| 契约方法 | zvec | chroma |
 | --- | --- | --- |
-| `add_documents` | `collection.insert([Doc(id, vectors, fields)])` + `optimize()` | `id` 由 `kb_id/doc_id/chunk_index` 组装，保证重复写入可覆盖；调用前先 `delete_document` |
-| `search` | `collection.query(queries=Query(field, vector), topk=k, filter=...)` | `filter` 只用于 doc 级过滤（每个知识库一个 collection）；COSINE 度量返回的值必须**显式换算成 `1 - distance`** 再对外，换算前后都用断言固定住 |
-| `count` | `collection.stats` | 必须与关系库里的分块数一致，供 `/api/kb/{id}` 与向量体检对账 |
-| `delete_kb` / `delete_document` | `collection.delete(...)` | 删除后 `count` 必须归零；整库重建用新建目录 + 重跑建库，不做原地格式转换 |
+| `add_documents` | 分批（50 条）`collection.upsert(Doc(id, vectors, fields))` → `flush()` → `optimize()`；id 由 `kb-doc-chunk` 组装 | 原实现：LangChain `add_documents` + uuid id |
+| `search` | `collection.query(queries=Query(field_name="embedding", vector=...), topk, filter, output_fields)`；MMR 由适配器自实现 | LangChain 的 similarity / MMR 检索调用 |
+| `count` | `collection.stats.doc_count` | `collection.count()` |
+| `delete_document` | 先 `iter_docs` 数出分块数，再 `delete_by_filter('doc_id = "…"')`（`delete_by_filter` 不返回条数，只能先数后删） | `collection.delete(where=...)` |
+| `delete_kb` | `collection.destroy()`（删磁盘目录 + 释放句柄） | 删除 collection |
 
-索引参数（HNSW + cosine）、向量维度与 collection schema 必须来自构造参数（接口层传入），
-适配器不许自己去读配置；换 embedding 导致的维度变化由既有的 `EmbeddingIdentityMismatch` 拦住。
+zvec 适配器的几个非直觉点（改动前先看 `zvec_store.py` 模块 docstring，那里有 zvec 0.7.0 的实测依据）：
+
+- **维度来自首次写入**：zvec 的 schema 必须显式给维度，而维度由 embedding 模型决定，因此 collection 在
+  **首次写入**时按刚算出的向量维度创建，省掉一份「向量维度」配置；维度不一致由 zvec 直接报可读错误；
+- **正文必须显式存**：zvec 只保存向量与 schema 声明的标量字段，不像 Chroma 会保存 `Document` 原文，
+  所以额外声明 `content` STRING 字段，检索时用它还原 `Document.page_content`；
+- **写入用 `upsert` 而不是 `insert`**：zvec 的 `insert` 撞 id 只返回错误码、不抛异常，`upsert` 覆盖同一分块，
+  重跑入库（重试 / 漏删）不会累积重复；
+- **单进程写**：zvec 的写锁按 collection 目录独占、**跨进程互斥**（写入进程持有时另一个进程连只读都打不开），
+  因此内嵌模式必须单进程部署，不要开 `uvicorn --workers`；需要多副本时改用远程向量服务（见风险登记簿）；
+- **每知识库一个 collection**：`ZVEC_PATH/kb_<id>/`；重建走「删目录 + 重跑建库」，不做原地格式转换。
+
+HNSW + cosine 是适配器内的固定选择，路径来自 `settings.ZVEC_PATH` / `CHROMA_PERSIST_DIR`；
+换 embedding 导致的向量空间变化由 `services/embedding.py` 的 `EmbeddingIdentityMismatch` 拦住。
 
 ### 3.3 关系库与 Repository
 
@@ -259,7 +279,7 @@ class TaskQueue(Protocol):
 
 | 维度 | 关系库（SQLite / PostgreSQL） | 向量库（zvec） |
 | --- | --- | --- |
-| 存什么 | 结构化事实：知识库、文档元数据与状态、会话与消息、引用来源、用户与 ACL | 分块文本 + 其**向量**，以及检索用元数据（`doc_id` / `kb_id` / `chunk_index` / `page_start` / `page_end`） |
+| 存什么 | 结构化事实：知识库、文档元数据与状态、会话与消息、引用来源、用户与 ACL | 分块文本 + 其**向量**，以及检索用元数据（`doc_id` / `kb_id` / `filename` / `chunk_index` / `page`；Phase 6 计划补 `page_start` / `page_end`） |
 | 回答什么问题 | 「有哪些库、哪些文档、处理到哪一步了、谁问了什么」 | 「哪些分块的语义最接近这个问题」 |
 | 查询方式 | SQL：等值 / 范围 / 排序 / 事务（ACID） | 近似最近邻（ANN，HNSW + cosine 距离） |
 | 索引依据 | 主键 / 外键 / 普通索引 | 向量索引（HNSW 图），依赖 embedding 空间 |
@@ -296,9 +316,9 @@ class TaskQueue(Protocol):
 **示例 B：加一个向量库 `pgvector`**（内置的是 zvec，见 3.2；这里演示再引入第三方）
 
 1. `services/vector_store/`（Phase 4 拆包）下新增 `pgvector.py`，实现第 3.2 节全部方法；
-2. 新增配置 `VECTOR_STORE=zvec|chroma|pgvector`，并在 `factory.get_vector_store()` 里查表；
+2. 在 `services/vector_store/__init__.py::build_vector_store` 的查表里加一个分支（`VECTOR_STORE=zvec|chroma|pgvector`）；
 3. 依赖进 `pyproject.toml` 的可选 extra；
-4. **跑同一套契约测试**（`tests/contracts/test_vector_store_contract.py`，参数化跑所有实现）；
+4. **跑同一套契约测试**（`tests/test_vector_store.py`，`store` fixture 参数化跑所有实现）；
 5. 迁移或建表脚本 + README「换向量库」小节（含「必须重建索引」的警告）。
 
 判定标准：如果为了接一个新后端你改了 `services/rag.py` 或 `api/*.py`，说明抽象漏了，先补接口再继续。
