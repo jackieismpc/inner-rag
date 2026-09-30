@@ -1,4 +1,8 @@
-"""知识库管理 API：CRUD + 成员授权（知识库级 ACL）。"""
+"""知识库管理 API：CRUD + 成员授权（知识库级 ACL）。
+
+本层只做参数校验、判权与序列化：查询与写入都在 ``repositories/``（见 `docs/architecture.md`
+§3.3），因此换关系库不需要改这个文件。
+"""
 
 from __future__ import annotations
 
@@ -7,13 +11,12 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from loguru import logger
-from sqlalchemy.orm import Session
 
-from inner_rag.api.deps import ensure_kb_access, get_current_user
+from inner_rag.api.deps import ensure_kb_access, get_current_user, get_repositories
 from inner_rag.core.access import AccessLevel, accessible_kb_ids, level_map
 from inner_rag.core.config import settings
-from inner_rag.core.database import get_db
-from inner_rag.models import KBMember, KBPermission, KnowledgeBase, User
+from inner_rag.models import KBPermission, KnowledgeBase, User
+from inner_rag.repositories import Repositories
 from inner_rag.schemas import (
     KBCreate,
     KBMemberAdd,
@@ -47,21 +50,15 @@ def list_kbs(
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     keyword: str | None = None,
-    db: Session = Depends(get_db),
+    repos: Repositories = Depends(get_repositories),
     user: User = Depends(get_current_user),
 ):
     """列出「我拥有或被授权」的知识库：过滤发生在 SQL 里，不是查完再筛。"""
-    query = db.query(KnowledgeBase).filter(KnowledgeBase.id.in_(accessible_kb_ids(user)))
-    if keyword:
-        query = query.filter(KnowledgeBase.name.like(f"%{keyword}%"))
-    total = query.count()
-    items = (
-        query.order_by(KnowledgeBase.created_at.desc())
-        .offset((page - 1) * page_size)
-        .limit(page_size)
-        .all()
+    kb_ids = accessible_kb_ids(repos.kbs, user)
+    items, total = repos.kbs.list_page(
+        kb_ids=kb_ids, keyword=keyword, page=page, page_size=page_size
     )
-    levels = level_map(db, user, [item.id for item in items])
+    levels = level_map(repos.kbs, user, [item.id for item in items])
     return ResponseModel(
         data=PageData(
             total=total,
@@ -75,16 +72,17 @@ def list_kbs(
 @router.post("", response_model=ResponseModel)
 def create_kb(
     body: KBCreate,
-    db: Session = Depends(get_db),
+    repos: Repositories = Depends(get_repositories),
     user: User = Depends(get_current_user),
 ):
-    payload = body.model_dump()
     # 建库时锁定 embedding 标识，之后换模型会被校验拦下，避免向量空间不一致
-    payload["embedding_model"] = payload.get("embedding_model") or settings.embedding_key
-    kb = KnowledgeBase(**payload, owner_id=user.id)
-    db.add(kb)
-    db.commit()
-    db.refresh(kb)
+    kb = repos.kbs.create(
+        name=body.name,
+        description=body.description,
+        icon=body.icon,
+        embedding_model=body.embedding_model or settings.embedding_key,
+        owner_id=user.id,
+    )
     logger.info(
         f"[KB] 创建知识库 id={kb.id} name={kb.name!r} owner={user.username} "
         f"embedding={kb.embedding_model}"
@@ -95,10 +93,10 @@ def create_kb(
 @router.get("/{kb_id}", response_model=ResponseModel)
 def get_kb(
     kb_id: int,
-    db: Session = Depends(get_db),
+    repos: Repositories = Depends(get_repositories),
     user: User = Depends(get_current_user),
 ):
-    kb, level = ensure_kb_access(db, kb_id, user, AccessLevel.READ)
+    kb, level = ensure_kb_access(repos.kbs, kb_id, user, AccessLevel.READ)
     data = _kb_out(kb, level).model_dump()
     data.update({"vector_count": vector_service.count(kb_id)})
     return ResponseModel(data=data)
@@ -108,31 +106,27 @@ def get_kb(
 def update_kb(
     kb_id: int,
     body: KBUpdate,
-    db: Session = Depends(get_db),
+    repos: Repositories = Depends(get_repositories),
     user: User = Depends(get_current_user),
 ):
     """改设置属于拥有者权限：成员能读能写文档，但不能改库的属性。"""
-    kb, _ = ensure_kb_access(db, kb_id, user, AccessLevel.OWNER)
-    for key, value in body.model_dump(exclude_none=True).items():
-        setattr(kb, key, value)
-    db.commit()
-    db.refresh(kb)
+    kb, _ = ensure_kb_access(repos.kbs, kb_id, user, AccessLevel.OWNER)
+    kb = repos.kbs.update(kb, body.model_dump(exclude_none=True))
     return ResponseModel(data=_kb_out(kb, AccessLevel.OWNER))
 
 
 @router.delete("/{kb_id}", response_model=ResponseModel)
 async def delete_kb(
     kb_id: int,
-    db: Session = Depends(get_db),
+    repos: Repositories = Depends(get_repositories),
     user: User = Depends(get_current_user),
 ):
-    kb, _ = ensure_kb_access(db, kb_id, user, AccessLevel.OWNER)
+    kb, _ = ensure_kb_access(repos.kbs, kb_id, user, AccessLevel.OWNER)
 
     # 先删向量与上传文件，再删数据库记录，避免留下孤儿数据（成员授权由外键级联删除）
     await vector_service.delete_kb(kb_id)
     shutil.rmtree(Path(settings.UPLOAD_DIR) / f"kb_{kb_id}", ignore_errors=True)
-    db.delete(kb)
-    db.commit()
+    repos.kbs.delete(kb)
     query_cache.invalidate_kb_sync(kb_id)
     logger.info(f"[KB] 删除知识库 id={kb_id} owner={user.username}")
     return ResponseModel(message="删除成功")
@@ -144,20 +138,17 @@ async def delete_kb(
 @router.get("/{kb_id}/members", response_model=ResponseModel)
 def list_members(
     kb_id: int,
-    db: Session = Depends(get_db),
+    repos: Repositories = Depends(get_repositories),
     user: User = Depends(get_current_user),
 ):
-    kb, _ = ensure_kb_access(db, kb_id, user, AccessLevel.OWNER)
-    rows = (
-        db.query(KBMember, User)
-        .join(User, KBMember.user_id == User.id)
-        .filter(KBMember.kb_id == kb_id)
-        .order_by(KBMember.created_at)
-        .all()
-    )
+    kb, _ = ensure_kb_access(repos.kbs, kb_id, user, AccessLevel.OWNER)
+    owner = repos.users.get(kb.owner_id)
+    if owner is None:
+        # 归属用户不存在意味着数据库被外部改坏了（FK 是 RESTRICT），显性报错而不是回一个空 owner
+        raise HTTPException(status_code=500, detail="知识库归属用户不存在，请联系管理员修复数据")
     return ResponseModel(
         data={
-            "owner": UserOut.model_validate(db.get(User, kb.owner_id)),
+            "owner": UserOut.model_validate(owner),
             "items": [
                 KBMemberOut(
                     user_id=member_user.id,
@@ -165,7 +156,7 @@ def list_members(
                     display_name=member_user.display_name,
                     permission=KBMemberPermission(member.permission.value),
                 )
-                for member, member_user in rows
+                for member, member_user in repos.kbs.list_members(kb_id)
             ],
         }
     )
@@ -175,26 +166,19 @@ def list_members(
 def add_member(
     kb_id: int,
     body: KBMemberAdd,
-    db: Session = Depends(get_db),
+    repos: Repositories = Depends(get_repositories),
     user: User = Depends(get_current_user),
 ):
     """按用户名授权；重复调用即改权限（幂等），不需要单独的「改权限」接口。"""
-    kb, _ = ensure_kb_access(db, kb_id, user, AccessLevel.OWNER)
+    kb, _ = ensure_kb_access(repos.kbs, kb_id, user, AccessLevel.OWNER)
 
-    target = db.query(User).filter(User.username == body.username).one_or_none()
+    target = repos.users.find_by_username(body.username)
     if target is None:
         raise HTTPException(status_code=404, detail=f"用户不存在: {body.username}")
     if target.id == kb.owner_id:
         raise HTTPException(status_code=400, detail="拥有者不需要加入成员列表")
 
-    member = db.get(KBMember, (kb_id, target.id))
-    if member is None:
-        db.add(
-            KBMember(kb_id=kb_id, user_id=target.id, permission=KBPermission(body.permission.value))
-        )
-    else:
-        member.permission = KBPermission(body.permission.value)
-    db.commit()
+    repos.kbs.upsert_member(kb_id, target.id, KBPermission(body.permission.value))
     logger.info(
         f"[KB] 授权 kb={kb_id} user={target.username} perm={body.permission.value} "
         f"by={user.username}"
@@ -214,14 +198,11 @@ def add_member(
 def remove_member(
     kb_id: int,
     user_id: int,
-    db: Session = Depends(get_db),
+    repos: Repositories = Depends(get_repositories),
     user: User = Depends(get_current_user),
 ):
-    ensure_kb_access(db, kb_id, user, AccessLevel.OWNER)
-    member = db.get(KBMember, (kb_id, user_id))
-    if member is None:
+    ensure_kb_access(repos.kbs, kb_id, user, AccessLevel.OWNER)
+    if not repos.kbs.remove_member(kb_id, user_id):
         raise HTTPException(status_code=404, detail="该用户不在授权列表中")
-    db.delete(member)
-    db.commit()
     logger.info(f"[KB] 移除授权 kb={kb_id} user_id={user_id} by={user.username}")
     return ResponseModel(message="已移除授权")

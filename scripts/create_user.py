@@ -10,6 +10,10 @@
 
 不提供 ``--password`` 参数：密码走交互输入或标准输入，避免进入 shell 历史与进程列表。
 密码强度由运维把关（脚本只拒绝空密码，过短会给出提示但不阻断）。
+
+**一处刻意的例外**：本脚本直接用 SQLAlchemy 会话读写用户表，不走 `repositories/`
+（见 `repositories/base.py` 的 ``UserRepository``）：建号 / 改口令是运维动作，需要口令哈希
+与交互式输入，不属于业务链路；业务链路只需要「按 id / 用户名读取用户」这一个小交集。
 """
 
 from __future__ import annotations

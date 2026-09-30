@@ -215,11 +215,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 async def build(args: argparse.Namespace) -> dict[str, Any]:
-    from sqlalchemy import select
-
     from inner_rag.core.config import settings
     from inner_rag.core.database import SessionLocal
-    from inner_rag.models import DocStatus, Document, KnowledgeBase, User
+    from inner_rag.repositories import NewDocument, build_repositories
     from inner_rag.services.parser import DocumentParser
     from inner_rag.services.vector_store import vector_service
 
@@ -245,41 +243,41 @@ async def build(args: argparse.Namespace) -> dict[str, Any]:
     print(f"[eval-kb] 选中 {len(selected)} 页 / {chars} 字符")
 
     with SessionLocal() as db:
-        owner = db.execute(select(User).where(User.username == args.owner)).scalar_one_or_none()
+        repos = build_repositories(db)
+        owner = repos.users.find_by_username(args.owner)
         if owner is None:
             raise SystemExit(f"用户 {args.owner} 不存在（用 --owner 指定一个已有账号）")
-        existing = db.execute(
-            select(KnowledgeBase).where(KnowledgeBase.name == name)
-        ).scalar_one_or_none()
+        # 同名库检查：知识库是「用户级」量级，脚本里取回全量再筛，不为此扩仓储契约
+        existing = next((kb for kb in repos.kbs.list_all() if kb.name == name), None)
         if existing is not None:
             if not args.rebuild:
                 raise SystemExit(f"知识库「{name}」已存在（id={existing.id}），加 --rebuild 重建")
             print(f"[eval-kb] 重建：删除旧库 id={existing.id}")
             await vector_service.delete_kb(existing.id)
-            db.delete(existing)
-            db.commit()
+            repos.kbs.delete(existing)
 
-        kb = KnowledgeBase(
+        kb = repos.kbs.create(
             name=name,
             description=f"龙族评测库（{args.profile}），由 scripts/build_eval_kb.py 构建",
-            owner_id=owner.id,
+            icon=None,
             embedding_model=settings.embedding_key,
+            owner_id=owner.id,
         )
-        db.add(kb)
-        db.flush()
-
-        doc = Document(
-            kb_id=kb.id,
-            filename=source.name,
-            file_path=str(source),
-            file_type="pdf",
-            file_size=source.stat().st_size,
-            status=DocStatus.PENDING,
-        )
-        db.add(doc)
-        db.commit()
-        db.refresh(doc)
-        kb_id, doc_id = kb.id, doc.id
+        # source_type 取历史默认值 `upload`：该字段此前由模型 default 填充，
+        # 显式写出以免新旧 manifest 之间的文档元数据出现无意义差异。
+        doc_id = repos.docs.add_many(
+            [
+                NewDocument(
+                    kb_id=kb.id,
+                    filename=source.name,
+                    file_path=str(source),
+                    file_type="pdf",
+                    file_size=source.stat().st_size,
+                    source_type="upload",
+                )
+            ]
+        )[0]
+        kb_id = kb.id
 
     # 入库链路：分块 → 嵌入 → 写向量（不经 HTTP 上传，因为窗口页不是一份独立文件）。
     # 免费 embedding 后端会偶发 Connection error，重试放在脚本里：分块 id 由 kb+doc+序号
@@ -301,17 +299,20 @@ async def build(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit("入库产生 0 个分块：manifest 不落盘")
 
     with SessionLocal() as db:
-        document = db.get(Document, doc_id)
+        repos = build_repositories(db)
+        document = repos.docs.get(doc_id)
         if document is not None:
-            document.status = DocStatus.COMPLETED
-            document.chunk_count = chunks
-            document.char_count = chars
-            document.meta_info = {
-                "page_windows": [[start, end] for start, end in windows],
-                "source_pages": len(selected),
-                "built_by": "scripts/build_eval_kb.py",
-            }
-        db.commit()
+            repos.docs.mark_completed(
+                document,
+                chunk_count=chunks,
+                char_count=chars,
+                meta={
+                    "page_windows": [[start, end] for start, end in windows],
+                    "source_pages": len(selected),
+                    "built_by": "scripts/build_eval_kb.py",
+                },
+            )
+            repos.docs.sync_kb_doc_count(kb_id)
 
     manifest = build_manifest(
         kb_id=kb_id,

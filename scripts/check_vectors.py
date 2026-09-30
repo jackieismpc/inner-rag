@@ -12,7 +12,7 @@ import argparse
 from collections import Counter
 
 from inner_rag.core.database import SessionLocal
-from inner_rag.models import Document, KnowledgeBase
+from inner_rag.repositories import build_repositories
 from inner_rag.services.vector_store import vector_service
 
 
@@ -21,13 +21,13 @@ def main() -> None:
     parser.add_argument("kb_id", nargs="?", type=int, help="知识库 ID（省略则检查全部）")
     args = parser.parse_args()
 
-    db = SessionLocal()
-    try:
+    with SessionLocal() as db:
+        repos = build_repositories(db)
         if args.kb_id is not None:
-            kbs = [db.get(KnowledgeBase, args.kb_id)]
+            kb = repos.kbs.get(args.kb_id)
+            kbs = [kb] if kb is not None else []
         else:
-            kbs = db.query(KnowledgeBase).order_by(KnowledgeBase.id.asc()).all()
-        kbs = [kb for kb in kbs if kb is not None]
+            kbs = repos.kbs.list_all()
         if not kbs:
             print("没有找到知识库")
             return
@@ -35,7 +35,7 @@ def main() -> None:
         for kb in kbs:
             vector_count = vector_service.count(kb.id)
             counts = vector_service.count_chunks_by_filename(kb.id)
-            docs = db.query(Document).filter(Document.kb_id == kb.id).all()
+            docs = repos.docs.list_by_kb(kb.id)
 
             print(f"\n=== kb_id={kb.id}  {kb.name}  embedding={kb.embedding_model} ===")
             print(f"collection 向量数: {vector_count}  文件数: {len(counts)}")
@@ -63,8 +63,6 @@ def main() -> None:
             )
             if orphans:
                 print(f"⚠️  存在无主向量（数据库已无对应文档）: {dict(orphans)}")
-    finally:
-        db.close()
 
 
 if __name__ == "__main__":

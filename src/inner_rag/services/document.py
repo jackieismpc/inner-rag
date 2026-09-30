@@ -2,12 +2,13 @@
 
 约定：
 
-* 所有对外方法自行创建并关闭数据库会话。这样后台任务、脚本与 API 层都能安全调用，
-  不会出现「请求级 Session 在响应返回时已关闭，后台任务却还在使用它」的问题；
+* 所有对外方法自行创建并关闭数据库会话（后台任务与脚本都能安全调用，不会出现
+  「请求级 Session 在响应返回时已关闭，后台任务却还在使用它」的问题）；会话只用来
+  构造仓储，业务代码不直接拼查询；
 * 处理入口 ``process_document`` 失败时**抛异常**（原因同时写进 ``document.error_msg``）：
   任务队列靠这个异常决定是否重试，脚本调用方也能看见失败而不是静默返回；
-  批量场景（HTTP 上传、路径导入）统一走 ``enqueue_processing``，由它把失败收敛成日志
-  ——一个文档失败不该让整批导入重跑（重跑会重复落库）。
+* 批量场景（HTTP 上传、路径导入）统一走 ``enqueue_processing`` / ``enqueue_import``，
+  由它们把失败收敛成日志——一个文档失败不该让整批导入重跑（重跑会重复落库）。
 """
 
 from __future__ import annotations
@@ -18,13 +19,13 @@ from pathlib import Path
 
 from fastapi import UploadFile
 from loguru import logger
-from sqlalchemy.orm import Session
 
 from inner_rag.core.config import settings
 from inner_rag.core.database import SessionLocal
 from inner_rag.core.metrics import metrics
 from inner_rag.core.observability import tracer
-from inner_rag.models import DocStatus, Document, KnowledgeBase
+from inner_rag.models import DocStatus
+from inner_rag.repositories import DocumentRepository, NewDocument, Repositories, build_repositories
 from inner_rag.services.cache import query_cache
 from inner_rag.services.embedding import ensure_embedding_matches
 from inner_rag.services.parser import parser
@@ -82,17 +83,7 @@ class DocumentService:
             raise
         return dest_path, original_name, size
 
-    # ── 处理流程 ───────────────────────────────────────────────────────
-
-    async def process_document(self, doc_id: int) -> None:
-        """任务入口：自建会话，处理单个文档；失败抛 ``DocumentProcessingError``。"""
-        db = SessionLocal()
-        try:
-            completed = await self._process(db, doc_id)
-        finally:
-            db.close()
-        if not completed:
-            raise DocumentProcessingError(f"文档处理失败（详见文档状态）: doc_id={doc_id}")
+    # ── 任务提交 ───────────────────────────────────────────────────────
 
     async def enqueue_processing(self, doc_id: int) -> str | None:
         """把「处理该文档」交给任务队列。
@@ -121,21 +112,32 @@ class DocumentService:
             logger.error(f"[DOC] 导入失败 kb={kb_id} path={path!r}: {exc}")
             return None
 
-    async def _process(self, db: Session, doc_id: int) -> bool:
+    # ── 处理流程 ───────────────────────────────────────────────────────
+
+    async def process_document(self, doc_id: int) -> None:
+        """任务入口：自建会话，处理单个文档；失败抛 ``DocumentProcessingError``。"""
+        db = SessionLocal()
+        try:
+            completed = await self._process(build_repositories(db), doc_id)
+        finally:
+            db.close()
+        if not completed:
+            raise DocumentProcessingError(f"文档处理失败（详见文档状态）: doc_id={doc_id}")
+
+    async def _process(self, repos: Repositories, doc_id: int) -> bool:
         """处理单个文档，返回是否完成（失败已写进 ``document.error_msg``）。"""
-        doc = db.get(Document, doc_id)
+        docs = repos.docs
+        doc = docs.get(doc_id)
         if doc is None:
             # 文档在排队期间被删掉是正常情况（删除文档与重新处理可以并发发生）：
             # 这里当作「无需处理」，既不该重试也不该报错
             logger.warning(f"[DOC] 文档已不存在，跳过处理: doc_id={doc_id}")
             return True
 
-        doc.status = DocStatus.PROCESSING
-        doc.error_msg = None
-        db.commit()
+        docs.update_status(doc, DocStatus.PROCESSING)
 
         try:
-            kb = db.get(KnowledgeBase, doc.kb_id)
+            kb = repos.kbs.get(doc.kb_id)
             ensure_embedding_matches(doc.kb_id, kb.embedding_model if kb else None)
 
             if not doc.file_path:
@@ -162,12 +164,13 @@ class DocumentService:
                     )
                 root.set(chunk_count=chunk_count, chars=meta.get("total_chars", 0))
 
-            doc.status = DocStatus.COMPLETED
-            doc.chunk_count = chunk_count
-            doc.char_count = meta.get("total_chars", 0)
-            doc.meta_info = meta
-            db.commit()
-            self._update_kb_doc_count(db, doc.kb_id)
+            docs.mark_completed(
+                doc,
+                chunk_count=chunk_count,
+                char_count=meta.get("total_chars", 0),
+                meta=meta,
+            )
+            docs.sync_kb_doc_count(doc.kb_id)
 
             # 新内容入库后必须让检索缓存失效，否则会持续返回旧结果
             await query_cache.invalidate_kb(doc.kb_id)
@@ -175,30 +178,12 @@ class DocumentService:
             logger.info(f"[DOC] 处理完成: {doc.filename}, chunks={chunk_count}")
             return True
         except Exception as exc:
+            # 失败原因来自解析 / 嵌入 / 向量写入，都不涉及数据库事务，因此直接做状态迁移即可
+            # （不做 rollback：那会把上游错误掩盖成「会话已回滚」这类次生问题）
             logger.error(f"[DOC] 处理失败 doc_id={doc_id}: {exc}")
             metrics.increment("rag_ingest_documents_total", labels={"status": "failed"})
-            db.rollback()
-            self._mark_failed(db, doc_id, exc)
+            docs.update_status(doc, DocStatus.FAILED, error_msg=str(exc)[:500])
             return False
-
-    @staticmethod
-    def _mark_failed(db: Session, doc_id: int, exc: Exception) -> None:
-        row = db.get(Document, doc_id)
-        if row is None:
-            return
-        row.status = DocStatus.FAILED
-        row.error_msg = str(exc)[:500]
-        db.commit()
-
-    @staticmethod
-    def _update_kb_doc_count(db: Session, kb_id: int) -> None:
-        count = (
-            db.query(Document)
-            .filter(Document.kb_id == kb_id, Document.status == DocStatus.COMPLETED)
-            .count()
-        )
-        db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).update({"doc_count": count})
-        db.commit()
 
     # ── 本地路径导入 ───────────────────────────────────────────────────
 
@@ -231,29 +216,28 @@ class DocumentService:
             pattern = "**/*" if recursive else "*"
             files = sorted(item for item in source.glob(pattern) if item.is_file())
 
-        db = SessionLocal()
-        try:
-            doc_ids: list[int] = []
-            for file in files:
-                if not self.is_supported_file(file.name):
-                    logger.warning(f"[DOC] 跳过不支持的文件: {file.name}")
-                    continue
-                destination = Path(self.get_upload_path(kb_id, file.name))
-                if file != destination:
-                    shutil.copy2(file, destination)
-                doc = Document(
+        items: list[NewDocument] = []
+        for file in files:
+            if not self.is_supported_file(file.name):
+                logger.warning(f"[DOC] 跳过不支持的文件: {file.name}")
+                continue
+            destination = Path(self.get_upload_path(kb_id, file.name))
+            if file != destination:
+                shutil.copy2(file, destination)
+            items.append(
+                NewDocument(
                     kb_id=kb_id,
                     filename=file.name,
                     file_path=str(destination),
                     file_type=parser.get_file_type(file.name),
                     file_size=file.stat().st_size,
                     source_type="local_path",
-                    status=DocStatus.PENDING,
                 )
-                db.add(doc)
-                db.flush()
-                doc_ids.append(doc.id)
-            db.commit()
+            )
+
+        db = SessionLocal()
+        try:
+            doc_ids = build_repositories(db).docs.add_many(items)
         finally:
             db.close()
 
@@ -263,8 +247,8 @@ class DocumentService:
 
     # ── 删除 ───────────────────────────────────────────────────────────
 
-    async def delete_document(self, db: Session, doc_id: int) -> bool:
-        doc = db.get(Document, doc_id)
+    async def delete_document(self, docs: DocumentRepository, doc_id: int) -> bool:
+        doc = docs.get(doc_id)
         if doc is None:
             return False
 
@@ -274,9 +258,8 @@ class DocumentService:
         if doc.file_path:
             Path(doc.file_path).unlink(missing_ok=True)
 
-        db.delete(doc)
-        db.commit()
-        self._update_kb_doc_count(db, kb_id)
+        docs.delete(doc)
+        docs.sync_kb_doc_count(kb_id)
         query_cache.invalidate_kb_sync(kb_id)
         return True
 
