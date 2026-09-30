@@ -23,6 +23,46 @@
 - **效果**必须能被复现或引用（跑过的命令、通过的用例数、评测指标、trace 链接等）。
 ---
 
+## [Phase 7] 2026-09-30 — 可插拔深化：五个插件点统一走注册表
+
+- 类型：重构 + 新增功能
+- 目的：Phase 0–6 已经把「能跑、能控权限、能排障、能算准」做完了，但「可插拔」还只在向量库这一处成立：
+  provider 靠 `if name == "xxx"` 分支，关系库的 SQLAlchemy 会话散落在路由 / 服务 / 脚本里，
+  缓存与后台任务直接写死了进程内实现。结果是**换任何后端都要改业务代码**，
+  而「可插拔」一旦不能兑现，第三方就无法接入、招聘方也无法验证——本阶段要把它变成**可被外部验证的能力**。
+- 方案：五个插件点（provider / 向量库 / 缓存 / 队列 / 关系库）各自补齐「接口 + 内置实现 + 配置项 +
+  探活 + 契约测试」五件套，名单统一由 `plugins/registry.py` 的 `Registry[T]` 维护。
+  - `Registry[T]`：名字 → 实现，支持 entry point 发现（`inner_rag.chat_providers` 等五个组名）；
+    同名重复注册直接抛错（静默覆盖会让「到底加载了哪个实现」变成谜）；第三方 entry point 加载失败
+    只告警并跳过，与内置同名时保留内置实现。
+  - provider：`spec` 与 `build` **成对注册**（避免注册一半：探活能过但实例建不出来）；
+    注册改为惰性（`specs._ensure_builtins`），解开 `specs` ↔ `chat` / `embeddings` 的循环 import。
+  - 缓存：`CacheBackend` 契约 + 每 namespace 一份有界 LRU；通配失效对齐 Redis `SCAN MATCH` 语义
+    （`1:*` 不误删 `11:*`）。
+  - 队列：`TaskQueue` 契约 + `inprocess`（并发上限 + 退避重试 + 有界历史）与 `inline`（同步执行），
+    取代 FastAPI `BackgroundTasks`；`process_document` 失败改为**抛异常**，让队列能决定是否重试。
+  - 关系库：`repositories/` 作为唯一入口，四个聚合契约（用户只读 / 知识库+成员 / 文档+状态机 /
+    会话+消息），事务边界写在仓储里；`core/access.py` 改依赖 `ACLReader` 协议，`core/` 不再反向
+    import 实现；`api/`、`services/`、`scripts/` 全部收敛（`create_user.py` 是显式例外：口令写入属运维动作）。
+  - 替换演练：新增 `memory` 向量库（零依赖进程内实现）+ MMR / 余弦 / 混合检索合并三处语义从 zvec
+    适配器提到 `base.py` 共用 + `GET /api/system/plugins` 暴露插件状态。
+- 效果（可复现）：
+  - **替换演练成立**：新增 `memory` 后端只改了 2 个文件（实现类 + 一行 `vector_stores.register`）
+    加 1 行测试参数，`services/rag.py` 与 `api/*.py` **零改动**，
+    `tests/test_vector_store.py` 的 `store` fixture 从 2 个后端扩到 3 个后**全部契约用例直接通过**；
+  - **业务层已无裸会话**：`grep -rn "SessionLocal\|db\.query" src/inner_rag/{api,services,core}` 无匹配；
+  - `GET /api/system/plugins` 返回五个插件点的 `configured` / `active` / `available` / `third_party`，
+    `/api/system/health` 返回同一份报告并据此降级（`status=degraded`）；
+  - 离线用例 **189 → 234**（新增 `test_repositories.py` 28 条、`test_plugins.py` 注册表语义与
+    插件状态接口、`test_vector_store.py` 的 memory 参数与后端边界）；
+  - 门禁全绿：`ruff check` / `ruff format --check`（98 files）/ `mypy`（55 source files，0 error）/
+    `pytest -q` → **234 passed, 8 deselected**。
+- 涉及提交：`c84f83e`（provider 注册表）、`5820568`（缓存抽象）、`614c8df`（任务队列）、
+  `65d795e`（关系库仓储）+ 收尾的 7.5 替换演练与文档同步
+
+---
+
+
 ## [Phase 5/6] 2026-09-30 — LangSmith 真实连通性打通（trace 与 feedback 双向验证）
 
 - 类型：修复 + 新增功能

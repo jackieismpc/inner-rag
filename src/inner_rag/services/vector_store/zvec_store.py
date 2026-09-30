@@ -10,7 +10,7 @@ zvec 0.7.0 的实测行为决定了这里的实现方式（改动前先把对应
   STRING 字段存下来，检索时才能还原成 ``Document``。
 * **COSINE 下 ``Doc.score`` 就是 ``1 - 余弦相似度``**（即距离口径），与 Chroma 一致，
   因此共用 ``distance_to_relevance``。
-* **没有 MMR API** → 适配器自己实现（见 ``_maximal_marginal_relevance``）。
+* **没有 MMR API** → 用 ``base.maximal_marginal_relevance``（与内存后端共用同一份实现）。
 * **写锁按 collection 目录独占，跨进程互斥**（实测：写者持有时另一个进程连只读都打不开）
   → 内嵌模式必须单进程部署，不要开 ``uvicorn --workers``；详见 ``docs/architecture.md`` 3.2。
 """
@@ -18,7 +18,6 @@ zvec 0.7.0 的实测行为决定了这里的实现方式（改动前先把对应
 from __future__ import annotations
 
 import asyncio
-import math
 import os
 import time
 from pathlib import Path
@@ -33,12 +32,12 @@ from inner_rag.services.embedding import embedding_service
 from inner_rag.services.vector_store.base import (
     CHUNK_METADATA_FIELDS,
     MMR_FETCH_FACTOR,
-    MMR_LAMBDA,
     WRITE_BATCH_SIZE,
     Strategy,
-    chunk_key,
     distance_to_relevance,
     finalize_results,
+    maximal_marginal_relevance,
+    merge_hybrid,
     prepare_chunks,
     resolve_search_defaults,
 )
@@ -193,7 +192,7 @@ class ZvecVectorStore:
             output_fields=_OUTPUT_FIELDS,
         )
         candidates = [(_to_document(doc), _stored_vector(doc), _distance(doc)) for doc in found]
-        return _maximal_marginal_relevance(candidates, k)
+        return maximal_marginal_relevance(candidates, k)
 
     @staticmethod
     def _hybrid(
@@ -208,16 +207,7 @@ class ZvecVectorStore:
             return raw
 
         docs = ZvecVectorStore._mmr(collection, vector, max(1, k - len(raw)), k * 2, filter_expr)
-        seen = {chunk_key(doc) for doc, _ in raw}
-        for doc in docs:
-            if len(raw) >= k:
-                break
-            key = chunk_key(doc)
-            if key in seen:
-                continue
-            seen.add(key)
-            raw.append((doc, None))
-        return raw
+        return merge_hybrid(raw, docs, k)
 
     # ── 删除与统计 ─────────────────────────────────────────────────────
 
@@ -356,43 +346,3 @@ def _ensure_ok(statuses: zvec.Status | list[zvec.Status], action: str) -> None:
         details = "; ".join(f"code={status.code()} {status.message()}" for status in failed)
         msg = f"zvec {action} 失败: {details}"
         raise RuntimeError(msg)
-
-
-def _maximal_marginal_relevance(
-    candidates: list[tuple[Document, list[float], float]], k: int
-) -> list[Document]:
-    """MMR 贪心选择，按 LangChain 的口径：``λ·sim(query,d) - (1-λ)·max sim(d, 已选)``。
-
-    ``candidates`` 是 (分块, 向量, 距离)；相关性直接用 ``1 - distance``（zvec 给的是余弦距离），
-    多样性用候选向量之间的余弦相似度。候选只有 ``fetch_k``（几十条）量级，纯 Python 足够。
-    """
-    similarities = [distance_to_relevance(distance) for _, _, distance in candidates]
-    vectors = [vector for _, vector, _ in candidates]
-    selected: list[int] = []
-    remaining = list(range(len(candidates)))
-
-    while remaining and len(selected) < k:
-        best_index = remaining[0]
-        best_score = -math.inf
-        for index in remaining:
-            diversity = max(
-                (_cosine_similarity(vectors[index], vectors[chosen]) for chosen in selected),
-                default=0.0,
-            )
-            score = MMR_LAMBDA * similarities[index] - (1 - MMR_LAMBDA) * diversity
-            if score > best_score:
-                best_score = score
-                best_index = index
-        selected.append(best_index)
-        remaining.remove(best_index)
-
-    return [candidates[index][0] for index in selected]
-
-
-def _cosine_similarity(left: list[float], right: list[float]) -> float:
-    """余弦相似度。零向量没有方向，按 0 处理（embedding 退化时不至于算术报错）。"""
-    dot = sum(x * y for x, y in zip(left, right, strict=True))
-    norm = math.sqrt(sum(x * x for x in left)) * math.sqrt(sum(y * y for y in right))
-    if norm == 0.0:
-        return 0.0
-    return dot / norm

@@ -1,7 +1,10 @@
-"""向量库契约测试：同一套用例跑两套后端（zvec / chroma）。
+"""向量库契约测试：同一套用例跑三套后端（zvec / chroma / memory）。
 
 断言的是 `docs/architecture.md` 3.2 的契约（相关度口径、阈值计数、MMR 无分数、标量元数据、
-删除后的可见性），不是某个后端的实现细节——两套实现的分块 id、排序细节允许不同。
+删除后的可见性），不是某个后端的实现细节——各实现的分块 id、排序细节允许不同。
+
+`memory` 是 Phase 7 的替换演练产物（`memory_store.py`）：它只加了一个实现类 + 一次
+`vector_stores.register`，业务代码零改动，却直接通过了下面全部契约用例。
 """
 
 from __future__ import annotations
@@ -28,9 +31,9 @@ def vector_paths(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
     monkeypatch.setattr(settings, "CHROMA_PERSIST_DIR", str(tmp_path / "chroma"))
 
 
-@pytest.fixture(params=["zvec", "chroma"])
+@pytest.fixture(params=["zvec", "chroma", "memory"])
 def store(vector_paths: None, request: pytest.FixtureRequest) -> VectorStore:
-    """参数化后端：两套实现必须通过同一份契约。"""
+    """参数化后端：三套实现必须通过同一份契约。"""
     return build_vector_store(request.param)
 
 
@@ -181,3 +184,37 @@ async def test_zvec_reingest_does_not_accumulate(zvec_store: VectorStore) -> Non
         assert zvec_store.count_chunks_by_filename(KB_ID) == {"unit.txt": chunks}
     finally:
         await zvec_store.delete_kb(KB_ID)
+
+
+def test_unknown_backend_error_lists_available_ones() -> None:
+    """配置写错时要能照着实提示改，而不是只说「不支持」。"""
+    with pytest.raises(ValueError) as excinfo:
+        build_vector_store("no-such-store")
+    message = str(excinfo.value)
+    assert "no-such-store" in message
+    for name in ("zvec", "chroma", "memory"):
+        assert name in message
+
+
+async def test_memory_reingest_does_not_accumulate() -> None:
+    """memory 用确定性分块 key（doc_id + chunk_index），重跑入库覆盖而不是累积。"""
+    store = build_vector_store("memory")
+    chunks = await _ingest(store)
+    try:
+        assert await _ingest(store) == chunks
+        assert store.count(KB_ID) == chunks
+    finally:
+        await store.delete_kb(KB_ID)
+
+
+async def test_memory_backend_instances_are_isolated() -> None:
+    """内存后端的边界：数据挂在实例上，两个实例互不可见（写在这里以免被误当成 bug）。"""
+    first = build_vector_store("memory")
+    second = build_vector_store("memory")
+    await _ingest(first)
+    try:
+        assert first.count(KB_ID) > 0
+        assert second.count(KB_ID) == 0
+        assert await second.search(kb_id=KB_ID, query="任意查询") == ([], 0)
+    finally:
+        await first.delete_kb(KB_ID)

@@ -17,15 +17,24 @@
 
 不设用例数量目标；README 里的用例数只是**现状快照**，不是 KPI。
 
-现状（Phase 0–4，用例数是快照不是目标）：
+现状（Phase 0–7，用例数是快照不是目标）：
 
 - `pyproject.toml` 里 `addopts = "-m 'not live'"`，即**默认只跑离线用例**；
 - `markers` 已注册 `live`；`live` 用例必须显式 `-m live` 才执行；
-- `tests/conftest.py` 强制把 `LLM_PROVIDER` / `EMBEDDING_PROVIDER` 钉成 `mock` 并设置
-  `EMBEDDING_MAX_INPUT_CHARS`，保证**不受开发者本机 `.env` 影响**；
-- 用例数快照：**149 个离线用例**（Phase 5 后），其中登录 / 鉴权 / ACL 在 `tests/test_auth.py`
+- `tests/conftest.py` 强制把 `LLM_PROVIDER` / `EMBEDDING_PROVIDER` 钉成 `mock`、设置
+  `EMBEDDING_MAX_INPUT_CHARS`、并把 `TASK_QUEUE_BACKEND` 设为 `inline`
+  （后台任务在请求内同步跑完，用例不必等队列），保证**不受开发者本机 `.env` 影响**；
+- 用例数快照：**234 个离线用例**（Phase 7 后），其中登录 / 鉴权 / ACL 在 `tests/test_auth.py`
   （多为参数化路由表，例如「11 条受保护路由全部 401」是一条用例的参数化而不是 11 条用例）；
-  向量库契约在 `tests/test_vector_store.py`（`store` fixture 参数化跑 zvec / chroma，同一份用例覆盖两个实现）；
+- **契约测试参数化跑所有实现**，这是 Phase 7 的核心验收方式：
+  - 向量库 `tests/test_vector_store.py`：`store` fixture 参数化跑 `zvec / chroma / memory`，
+    同一份用例（相关度口径、阈值计数、MMR 无分数、元数据白名单、删除可见性）覆盖三个实现；
+  - 缓存 `tests/test_cache.py`：`BACKEND_FACTORIES` 参数化跑后端，业务缓存用例单独一组；
+  - 任务队列 `tests/test_task_queue.py`：并发上限、退避重试后的 attempts、永久失败的归因、历史有界；
+  - 关系库 `tests/test_repositories.py`：直接对仓储断言（含 `history` 取最近 N 条、
+    `reset_kb_for_reprocess` 不跨库误伤、删库级联），验证用**新开会话**读回，避免只验证身份映射缓存；
+  - 插件注册表 `tests/test_plugins.py`：撞名抛错、entry point 失败跳过、同名保留内置，
+    以及一个第三方 provider 只靠注册 + 改配置就跑通「建库 → 上传 → 提问」的端到端演练；
 - 测试库与向量库都用临时目录，不写 `./data`；跑完即清理；
 - `benchmark/` 的指标与评测集校验也有离线用例（`tests/test_benchmark_metrics.py`）；
   `--mode fixtures` 的评测自检不在 pytest 里，要单独跑（见第 6 节）。
@@ -37,14 +46,16 @@ tests/
 ├── conftest.py              # 环境钉死 + 公共 fixture（临时库、已登录 client、建号/登录辅助、假 provider）
 ├── test_auth.py             # L2：登录 / 鉴权 / ACL（401·403 路由表、伪造 Token、成员权限）
 ├── test_api.py              # L2：kb / document / chat / system 接口
-├── test_cache.py            # L1/L2：query 与 embedding 缓存语义与失效
+├── test_cache.py            # L1/L2：缓存引擎 + CacheBackend 契约（参数化跑后端）+ query/embedding 缓存语义
+├── test_task_queue.py       # L1/L2：并发上限、退避重试、失败归因、历史有界、未知后端报错
+├── test_repositories.py     # L1/L2：仓储契约（事务边界、排序、作用域、级联）
+├── test_plugins.py          # L1/L2：注册表语义 + 第三方 provider / 插件状态接口的端到端演练
 ├── test_parser.py           # L1/L2：解析与 OCR 后端行为
 ├── test_providers.py        # L1：spec 解析、错误文案、健康检查状态机
-├── test_vector_store.py     # L1/L2：写入、检索策略、阈值、相关度换算（参数化跑 zvec / chroma）
+├── test_vector_store.py     # L1/L2：写入、检索策略、阈值、相关度换算（参数化跑 zvec / chroma / memory）
 ├── test_benchmark_metrics.py # L1/L4：基准指标算法、评测集 schema 与锚点校验
 ├── test_observability.py    # L1/L2：request_id、结构化日志、span 树、指标与 Prometheus 导出
-├── test_live_providers.py   # L3：真实联网（-m live）
-└── contracts/               # Phase 7：插件点契约测试（参数化跑所有实现）
+└── test_live_providers.py   # L3：真实联网（-m live）
 ```
 
 命名与编写规范：

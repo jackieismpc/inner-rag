@@ -13,6 +13,7 @@ from inner_rag.core.config import settings
 from inner_rag.core.metrics import metrics
 from inner_rag.core.observability import tracer
 from inner_rag.models import User
+from inner_rag.plugins import plugin_status
 from inner_rag.providers import (
     chat_health,
     chat_models,
@@ -42,20 +43,25 @@ def _safe(callable_) -> str | None:
 async def health_check(
     probe: bool = Query(default=True, description="是否真实探测 provider（离线环境可关）"),
 ):
-    """探活当前 chat / embedding provider。
+    """探活当前 chat / embedding provider 与各插件点。
 
     provider 配置非法（未知名称、缺 API Key）时返回 200 + status=degraded，
     并在 error 里写清该改哪个环境变量 —— 探活接口本身不应该 5xx。
+
+    插件点配置非法同样只降级（``plugins.<key>.active = false``），因为「后端选错」不是
+    「进程活着但没法服务」——后续请求会各自抛出可读错误，比在这里 5xx 更好定位。
     """
     # 探活是网络调用，放到线程里跑，避免阻塞事件循环
     llm = await asyncio.to_thread(chat_health, probe)
     embedding = embedding_health()
-    status = "healthy" if llm["ok"] and embedding["ok"] else "degraded"
+    plugins = plugin_status()
+    healthy = llm["ok"] and embedding["ok"] and all(item["active"] for item in plugins.values())
     return {
-        "status": status,
+        "status": "healthy" if healthy else "degraded",
         "version": settings.APP_VERSION,
         "llm": llm,
         "embedding": embedding,
+        "plugins": plugins,
     }
 
 
@@ -93,6 +99,16 @@ async def list_providers(user: User = Depends(get_current_user)):
         },
         "embedding_key": _safe(lambda: settings.embedding_key),
     }
+
+
+@router.get("/plugins")
+async def list_plugins(user: User = Depends(get_current_user)):
+    """五个插件点（chat / embedding / 向量库 / 缓存 / 队列）的当前实现与可选实现。
+
+    存在的意义：替换演练与排障都要能回答「现在到底跑的哪个后端」。逐插件点手工统计
+    （改配置项就要改接口）迟早会漏，所以这里直接遍历注册表，第三方实现也一并列出。
+    """
+    return {"data": plugin_status()}
 
 
 @router.get("/stats")

@@ -21,13 +21,15 @@
   知识库级 ACL 分 `read`（看库 / 提问）/ `write`（+ 增删文档）/ `owner`（+ 改设置 / 删库 / 授权成员）三级，
   列表按「我拥有或被授权」过滤
 - **模型后端可插拔**：Chat 与 Embedding 各自独立选型（Ollama / OpenRouter / DeepSeek / OpenAI 兼容 /
-  离线 mock），只改 `.env`；provider 名写错或漏填 Key 时得到「该去 .env 改哪个变量」的明确提示（503）
+  离线 mock），只改 `.env`；provider 名写错或漏填 Key 时得到「该去 .env 改哪个变量」的明确提示（503）。
+  五个插件点（provider / 向量库 / 缓存 / 队列 / 关系库）统一走 `plugins/` 注册表，第三方包可用
+  entry point 注册实现而**不改本项目源码**；`GET /api/system/plugins` 可查当前后端与全部可选项
 - **性能与成本控制**：Embedding 缓存（按 `provider:model` 隔离）+ 检索缓存（LRU + TTL，按库精确失效）、
-  批量嵌入 + 信号量限流、模型实例在工厂内复用
+  批量嵌入 + 信号量限流、模型实例在工厂内复用、文档入库走有界并发的后台队列（带退避重试）
 - **可观测与工程化**：每个请求一个 `request_id`（贯穿响应头、日志与 trace）；检索 / 问答 / 入库全链路
   span 计时，可选上报 LangSmith（默认关闭，零网络零费用）；`LOG_FORMAT=json` 一行一 JSON；
   `GET /api/system/metrics` 输出延迟分位、空召回、缓存命中与 token 用量；uv 锁依赖、Alembic 迁移、
-  生产环境拒绝用默认 / 过短的 JWT 密钥启动、ruff + mypy、149 个离线 pytest 用例（另 5 个联网验收）、
+  生产环境拒绝用默认 / 过短的 JWT 密钥启动、ruff + mypy、234 个离线 pytest 用例（另 8 个联网验收）、
   Dockerfile + docker compose
 
 ## 架构
@@ -67,6 +69,11 @@ flowchart LR
 `chat`（Chat 模型构造 + 离线 mock 模型）、`embeddings`（向量模型构造 + 截断包装 + 离线 mock 向量）、
 `factory`（按配置构造并缓存实例、探活、模型发现）。
 
+`plugins/registry.py` 是所有插件点的名单来源：`Registry[T]` 把「有哪些实现」变成运行时可枚举的数据，
+内置实现在各自模块注册，第三方包用 entry point（`inner_rag.chat_providers` / `inner_rag.embedding_providers` /
+`inner_rag.vector_stores` / `inner_rag.cache_backends` / `inner_rag.task_queues`）追加。
+关系库访问统一走 `repositories/`（`build_repositories(db)` 返回聚合仓储，与请求共享同一个会话）。
+
 ## 技术栈
 
 | 层次 | 选型 |
@@ -74,7 +81,7 @@ flowchart LR
 | 语言 / 包管理 | Python 3.13（uv 管理）、`uv.lock` 锁定依赖 |
 | Web 框架 | FastAPI 0.141+、Uvicorn 0.54+、SSE 流式响应 |
 | LLM 编排 | LangChain 1.x（`langchain-core` 1.6+、`langchain-text-splitters`）+ `langchain-ollama`（本地）/ `langchain-openai`（OpenAI 兼容云端）/ `langchain-deepseek`（DeepSeek 官方集成） |
-| 向量库 | **zvec 0.7.0**（Alibaba 开源、嵌入式、HNSW + cosine，默认后端，锁版本）；ChromaDB 1.5+ / `langchain-chroma` 保留为兼容后端（`VECTOR_STORE=chroma`） |
+| 向量库 | **zvec 0.7.0**（Alibaba 开源、嵌入式、HNSW + cosine，默认后端，锁版本）；ChromaDB 1.5+ / `langchain-chroma` 保留为兼容后端（`VECTOR_STORE=chroma`）；`memory` 零依赖进程内实现（测试 / CI / 替换演练用） |
 | 关系库 | SQLite（开发默认）+ PostgreSQL 16（部署可选）+ SQLAlchemy 2.1 + Alembic 1.20 |
 | 认证与权限 | JWT（PyJWT，HS256）+ argon2id 口令哈希（argon2-cffi）+ 知识库级 ACL（owner / member） |
 | 文档解析 | pypdf、PyMuPDF、python-docx、docx2txt、openpyxl、xlrd、Pillow、chardet |
@@ -85,6 +92,8 @@ flowchart LR
 > Apache-2.0，定位「向量库里的 SQLite」：进程内嵌入、无需独立服务、HNSW + cosine、WAL 持久化），
 > 理由是「零运维」，与 SQLite 单文件开发模型一致。Phase 4 起 zvec 已是默认后端（`VECTOR_STORE=zvec`），
 > ChromaDB 保留为兼容实现；两者受同一个 `VectorStore` 契约约束并跑同一套契约测试（见 `docs/architecture.md` 3.2）。
+> Phase 7 又加了 `memory`（零依赖进程内实现，`VECTOR_STORE=memory`）：它是「换后端不改业务代码」的实证——
+> 新增它只加了一个实现类 + 一次注册，同一套契约用例直接全绿；代价是数据只在内存、重启即丢，仅供测试与演练。
 > 注意内嵌 zvec 按 collection 目录独占写锁，**必须单进程部署**（不要 `uvicorn --workers`）。
 
 ## 快速开始
@@ -273,8 +282,15 @@ TOKEN=$(curl -s -X POST localhost:8010/api/auth/login \
 | `LLM_PROVIDER` / `EMBEDDING_PROVIDER` | `ollama` | 两个**独立**开关；向量侧没有 `deepseek`（官方无 embeddings 接口） |
 | `OPENROUTER_API_KEY` / `DEEPSEEK_API_KEY` / `OPENAI_API_KEY` | 空 | 云端 API 密钥，只写在 `.env`，不要提交 |
 | `EMBEDDING_MAX_INPUT_CHARS` | `0` | 单条输入的字符上限（0 = 不截断）；小上下文模型建议设 `400` |
-| `VECTOR_STORE` | `zvec` | 向量库后端：`zvec`（嵌入式，默认）/ `chroma`（兼容旧数据）；切换后用 `scripts/reindex_kb.py <kb_id>` 重建 |
+| `VECTOR_STORE` | `zvec` | 向量库后端：`zvec`（嵌入式，默认）/ `chroma`（兼容旧数据）/ `memory`（零依赖进程内，重启即丢）；切换后用 `scripts/reindex_kb.py <kb_id>` 重建 |
 | `ZVEC_PATH` | `./data/zvec_db` | zvec 数据目录，每知识库一个 `kb_<id>/` collection；写锁目录独占，**单进程部署** |
+| `CACHE_BACKEND` | `memory` | 缓存后端：`memory`（每 namespace 一份有界 LRU）；换 Redis 只需加实现 + 注册 |
+| `QUERY_CACHE_MAX_SIZE` / `QUERY_CACHE_TTL` | `500` / `300` | 检索缓存容量与有效期（秒，0 = 不过期）；入库后仍会按 `kb_id` 精确失效 |
+| `EMBEDDING_CACHE_MAX_SIZE` | `2000` | 嵌入缓存容量；按 `provider:model` 隔离，跨模型不会命中 |
+| `TASK_QUEUE_BACKEND` | `inprocess` | 后台任务队列：`inprocess`（协程池）/ `inline`（同步执行，测试用） |
+| `TASK_QUEUE_CONCURRENCY` | `2` | 后台并发上限；免费 embedding 路由限流严，别调大 |
+| `TASK_QUEUE_MAX_RETRIES` / `TASK_QUEUE_RETRY_BACKOFF` | `1` / `5.0` | 失败重试次数与退避系数（`backoff × attempt` 秒） |
+| `TASK_QUEUE_HISTORY` | `200` | 任务历史环形缓冲大小（`/api/system/stats` 展示） |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `200` | 分块参数，影响召回粒度；改动后建议重建索引并跑基准 |
 | `RETRIEVAL_SCORE_THRESHOLD` | `0.3` | 相关度阈值（`1 - 余弦距离`）；过高会导致空召回 |
 | `AUTO_CREATE_TABLES` | `false` | 表结构交给 Alembic；仅测试/一次性库设为 `true` |
@@ -343,8 +359,10 @@ inner-rag/
 │   ├── models/               # SQLAlchemy 2.0 ORM 模型（含 user / kb_member）
 │   ├── schemas/              # Pydantic 请求/响应模型
 │   ├── api/                  # 路由：auth / kb / document / chat / system + 鉴权依赖（deps.py）
+│   ├── repositories/         # 关系库访问的唯一入口：base 契约（Protocol）+ sqlalchemy 实现 + build_repositories
+│   ├── plugins/              # 插件注册表：Registry[T] + chat/embedding/向量库/缓存/队列五个插件点 + plugin_status()
 │   ├── providers/            # 模型后端抽象：specs / chat / embeddings / factory（多 provider）
-│   └── services/             # parser、ocr、embedding、vector_store/（base + zvec/chroma 适配 + 工厂）、rag、cache、retrieval_log
+│   └── services/             # parser、ocr、embedding、vector_store/（base + zvec/chroma/memory 适配 + 注册）、rag、cache、task_queue、retrieval_log
 ├── scripts/                  # 运维与排查脚本（含建号 create_user.py）+ start.sh
 ├── tests/                    # 离线 pytest 用例 + 可选的真实 API 联网验收（-m live）
 ├── benchmark/                # 基准脚本：指标、评测集运行、结果落盘、README 基准表维护
@@ -383,9 +401,10 @@ inner-rag/
 | GET | `/api/chat/conversations` | 会话列表 |
 | GET | `/api/chat/conversations/{id}/messages` | 会话消息（含引用来源） |
 | DELETE | `/api/chat/conversations/{id}` | 删除会话 |
-| GET | `/api/system/health` | 健康检查（后端 + Chat/Embedding provider 连通性与错误原因） |
+| GET | `/api/system/health` | 健康检查（后端 + Chat/Embedding provider 连通性与错误原因 + 各插件点当前后端） |
 | GET | `/api/system/providers` | 全部可用 provider、当前选择、key 是否已配置（不返回密钥） |
-| GET | `/api/system/stats` | 检索统计 + 缓存状态 |
+| GET | `/api/system/plugins` | 五个插件点（chat / embedding / 向量库 / 缓存 / 队列）的当前实现、可选实现与第三方实现 |
+| GET | `/api/system/stats` | 检索统计 + 缓存状态 + 后台队列状态 |
 | GET | `/api/system/metrics` | 进程内指标（延迟分位、检索 / 缓存 / token / 入库）+ 追踪状态；**免登录**，配 `METRICS_TOKEN` 时需 `X-Metrics-Token` |
 | GET | `/api/system/config` | 前端可用的非敏感运行时配置 |
 | GET | `/api/system/models` | 当前 provider 的可用模型列表（Ollama / 云端 `/models`） |
@@ -555,12 +574,15 @@ A：没有注册与找回入口（企业内部账号由管理员发放）：`uv 
   身份与访问控制（Phase 3）——本地账号 + JWT 登录、argon2id 口令哈希、知识库级 ACL（owner / 只读 /
   可写）、前端登录页与按权限渲染、`scripts/create_user.py` 建号；
   向量库统一到 zvec（Phase 4）——`VectorStore` 契约 + zvec 默认后端 + Chroma 兼容实现，
-  同一套契约测试参数化跑两个后端
-- **进行中**：开发文档体系（`docs/DEVELOPMENT_PLAN.md` 及其子文档）、龙族真实评测集与 `benchmark/` 指标脚本
-- **Phase 5–10**：可观测性
-  （LangSmith 追踪 + 运行日志与指标）→ 评测体系与准确性基线 → 可插拔深化
-  （provider 注册表、关系库 / 缓存 / 队列抽象）→ 用评测集驱动检索与回答质量提升 →
-  OCR / VLM 文档面扩展 → 交付（Docker / PostgreSQL / CI）
+  同一套契约测试参数化跑两个后端；
+  可观测性（Phase 5）——`request_id` 贯穿、日志 text/json、指标注册表、LangSmith 追踪（默认关闭）；
+  评测体系（Phase 6）——龙族真实语料评测库 + `benchmark/` 检索指标 + `scripts/eval_answer.py`
+  （judge 正确性 / 忠实度 / 成本）与基线数字落档；
+  可插拔深化（Phase 7）——五个插件点统一走 `plugins/` 注册表（含第三方 entry point）、
+  关系库收敛到 `repositories/`、缓存与后台队列抽象化、`memory` 向量库作为替换演练实证、
+  `GET /api/system/plugins` 暴露插件状态
+- **进行中**：Phase 8——用评测集驱动检索与回答质量提升（分块策略 / rerank / 查询改写 / 阈值定标）
+- **Phase 9–10**：OCR / VLM 文档面扩展 → 交付（Docker / PostgreSQL / CI）
 
 每个阶段的交付物、完成定义、测试门禁（G0–G3）与里程碑见 `docs/DEVELOPMENT_PLAN.md`。
 

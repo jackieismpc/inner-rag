@@ -17,11 +17,13 @@
   将来调整分块策略（合并相邻页）时只改 ``page_span`` 一处即可，不必再改契约。
 
 新增后端时：写入前调用 ``prepare_chunks``、返回前调用 ``finalize_results``、
-检索默认值走 ``resolve_search_defaults``，即可与现有后端保持同一份语义。
+检索默认值走 ``resolve_search_defaults``，需要 MMR / 混合检索时直接用
+``maximal_marginal_relevance`` 与 ``merge_hybrid``，即可与现有后端保持同一份语义。
 """
 
 from __future__ import annotations
 
+import math
 from typing import Literal, Protocol
 
 from langchain_core.documents import Document
@@ -195,3 +197,75 @@ class VectorStore(Protocol):
     def list_doc_ids(self, kb_id: int) -> list[str]:
         """库里出现过的 doc_id（用于发现删除后的残留向量）。"""
         ...
+
+
+# ── MMR / 混合检索的共享语义 ────────────────────────────────────────────
+#
+# 这两段逻辑与具体后端无关，但每个后端都要用；放在契约文件里是为了让「新增后端」
+# 不必自己再实现一遍（也避免各后端慢慢漂移出不同的 MMR 口径）。
+# 检索类后端把 ``maximal_marginal_relevance`` 与 ``merge_hybrid`` 组合起来即可。
+
+
+def cosine_similarity(left: list[float], right: list[float]) -> float:
+    """余弦相似度。零向量没有方向，按 0 处理（embedding 退化时不至于算术报错）。"""
+    dot = sum(x * y for x, y in zip(left, right, strict=True))
+    norm = math.sqrt(sum(x * x for x in left)) * math.sqrt(sum(y * y for y in right))
+    if norm == 0.0:
+        return 0.0
+    return dot / norm
+
+
+def maximal_marginal_relevance(
+    candidates: list[tuple[Document, list[float], float]], k: int
+) -> list[Document]:
+    """MMR 贪心选择，按 LangChain 的口径：``λ·sim(query,d) - (1-λ)·max sim(d, 已选)``。
+
+    ``candidates`` 是 (分块, 向量, 距离)；相关性用 ``distance_to_relevance`` 换算，
+    多样性用候选向量之间的余弦相似度。候选只有 ``fetch_k``（几十条）量级，纯 Python 足够。
+    """
+    similarities = [distance_to_relevance(distance) for _, _, distance in candidates]
+    vectors = [vector for _, vector, _ in candidates]
+    selected: list[int] = []
+    remaining = list(range(len(candidates)))
+
+    while remaining and len(selected) < k:
+        best_index = remaining[0]
+        best_score = -math.inf
+        for index in remaining:
+            diversity = max(
+                (cosine_similarity(vectors[index], vectors[chosen]) for chosen in selected),
+                default=0.0,
+            )
+            score = MMR_LAMBDA * similarities[index] - (1 - MMR_LAMBDA) * diversity
+            if score > best_score:
+                best_score = score
+                best_index = index
+        selected.append(best_index)
+        remaining.remove(best_index)
+
+    return [candidates[index][0] for index in selected]
+
+
+def merge_hybrid(
+    scored: list[tuple[Document, float | None]], diverse: list[Document], k: int
+) -> list[tuple[Document, float | None]]:
+    """相似度结果 + MMR 去重补充到 ``k`` 条（hybrid 策略的收尾）。
+
+    ``scored`` 是相似度检索的 (分块, 相关度)，``diverse`` 是 MMR 按多样性挑出的候选。
+    补充项的分数是 ``None``——MMR 是「选择」而不是「打分」，编一个分数出来会让
+    阈值过滤与结果展示都失真（见模块 docstring 的「MMR 无分数」）。
+    """
+    if len(scored) >= k:
+        return list(scored)
+
+    merged = list(scored)
+    seen = {chunk_key(doc) for doc, _ in merged}
+    for doc in diverse:
+        if len(merged) >= k:
+            break
+        key = chunk_key(doc)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append((doc, None))
+    return merged

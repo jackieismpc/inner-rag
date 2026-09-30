@@ -19,7 +19,14 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
 from inner_rag.core.config import settings
-from inner_rag.plugins.registry import ChatProvider, PluginError, Registry, chat_providers
+from inner_rag.plugins.registry import (
+    ALL_REGISTRIES,
+    ChatProvider,
+    PluginError,
+    Registry,
+    chat_providers,
+    plugin_status,
+)
 from inner_rag.providers import get_chat_model, provider_catalog, reset_cache
 from inner_rag.providers.specs import ProviderSpec, chat_spec
 from inner_rag.services.rag import rag_service
@@ -58,7 +65,7 @@ def _dummy_plugin() -> ChatProvider:
 
 
 def test_duplicate_registration_is_rejected() -> None:
-    registry: Registry[str] = Registry("test backend", "test.group")
+    registry: Registry[str] = Registry("test", "test backend", "test.group", "TEST_BACKEND")
     registry.register("a", "first")
 
     with pytest.raises(PluginError) as excinfo:
@@ -82,7 +89,7 @@ def test_entry_point_failure_is_skipped_and_duplicate_keeps_builtin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """第三方包坏了只告警；与内置同名时以内置为准。"""
-    registry: Registry[str] = Registry("test backend", "test.group")
+    registry: Registry[str] = Registry("test", "test backend", "test.group", "TEST_BACKEND")
     registry.register("builtin", "内置实现")
     monkeypatch.setattr(
         "inner_rag.plugins.registry.entry_points",
@@ -97,6 +104,42 @@ def test_entry_point_failure_is_skipped_and_duplicate_keeps_builtin(
     assert registry.get("builtin") == "内置实现"
     assert registry.get("third") == "第三方实现"
     assert registry.get("broken") is None
+    assert registry.third_party_names() == ("third",)
+    # 幂等：重复调用不会再加载一遍（也不会把 third 重复注册进去）
+    assert registry.load_entry_points() == []
+    assert registry.third_party_names() == ("third",)
+
+
+def test_configured_name_reads_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """插件点自己知道「哪个配置项驱动它」：接口与报错都不用再维护第二张映射表。"""
+    registry: Registry[str] = Registry("x", "x backend", "x.group", "VECTOR_STORE")
+    registry.register("memory", "impl")
+
+    monkeypatch.setattr(settings, "VECTOR_STORE", "Memory")
+    assert registry.configured_name() == "memory"  # 大小写归一，与 build_* 的解析口径一致
+    assert registry.is_active() is True
+
+    monkeypatch.setattr(settings, "VECTOR_STORE", "no-such-backend")
+    assert registry.is_active() is False
+
+
+def test_plugin_status_covers_every_registry() -> None:
+    report = plugin_status()
+    assert set(report) == {registry.key for registry in ALL_REGISTRIES}
+    assert set(report) == {"chat", "embedding", "vector_store", "cache", "task_queue"}
+
+    vector_store = report["vector_store"]
+    assert vector_store["settings_key"] == "VECTOR_STORE"
+    assert vector_store["configured"] == settings.VECTOR_STORE.strip().lower()
+    assert vector_store["active"] is True
+    assert "memory" in vector_store["available"]
+    assert vector_store["entry_point_group"] == "inner_rag.vector_stores"
+    assert vector_store["third_party"] == []
+
+    # 每个插件点的配置项都真实存在（写错配置项名会让 active 永远为 False）
+    for entry in report.values():
+        assert hasattr(settings, entry["settings_key"]), entry["settings_key"]
+        assert entry["available"]
 
 
 # ── 端到端：不改业务代码地接入一个第三方 provider ──────────────────────
@@ -141,3 +184,33 @@ def test_third_party_chat_provider_works_without_business_code_change(
     assert message["sources"]
 
     reset_cache()
+
+
+# ── 状态接口：插件点必须能从外部看见 ───────────────────────────────────
+
+
+def test_plugins_endpoint_reports_every_plugin_point(client: TestClient) -> None:
+    response = client.get("/api/system/plugins")
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+
+    assert set(data) == {"chat", "embedding", "vector_store", "cache", "task_queue"}
+    assert data["vector_store"]["configured"] == settings.VECTOR_STORE.strip().lower()
+    assert data["cache"]["configured"] == settings.CACHE_BACKEND.strip().lower()
+    assert data["task_queue"]["configured"] == settings.TASK_QUEUE_BACKEND.strip().lower()
+    assert all(item["active"] for item in data.values())
+    # 前端要展示「有哪些后端可选」，所以列表必须非空
+    assert all(item["available"] for item in data.values())
+
+
+def test_plugins_endpoint_requires_login(anonymous_client: TestClient) -> None:
+    assert anonymous_client.get("/api/system/plugins").status_code == 401
+
+
+def test_health_reflects_plugin_status(client: TestClient) -> None:
+    """health 的 status 要把「插件点配置写错」也算进降级，而不是只看 provider 探活。"""
+    body = client.get("/api/system/health", params={"probe": "false"}).json()
+    plugins = body["plugins"]
+    assert set(plugins) == {"chat", "embedding", "vector_store", "cache", "task_queue"}
+    assert all(item["active"] for item in plugins.values())
+    assert body["status"] in {"healthy", "degraded"}

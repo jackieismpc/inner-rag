@@ -24,9 +24,9 @@ from inner_rag.services.embedding import embedding_service
 from inner_rag.services.vector_store.base import (
     WRITE_BATCH_SIZE,
     Strategy,
-    chunk_key,
     distance_to_relevance,
     finalize_results,
+    merge_hybrid,
     prepare_chunks,
     resolve_search_defaults,
 )
@@ -153,16 +153,7 @@ class ChromaVectorStore:
             fetch_k=k * 2,
             filter=where,
         )
-        seen = {chunk_key(doc) for doc, _ in raw}
-        for doc in mmr_docs:
-            if len(raw) >= k:
-                break
-            key = chunk_key(doc)
-            if key in seen:
-                continue
-            seen.add(key)
-            raw.append((doc, None))
-        return raw
+        return merge_hybrid(raw, mmr_docs, k)
 
     @staticmethod
     def _build_filter(filter_doc_ids: list[int] | None) -> dict | None:

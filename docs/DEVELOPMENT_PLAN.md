@@ -308,7 +308,7 @@ changelog 与密钥自检）。
 2. **成本估算留空**：单价属计费域，脚本默认 0 并在报告里标注「未配置价格表」（Phase 10）；
 3. **LangSmith 真实连通性**：无 Key，未做端到端验证。
 
-### Phase 7 — 可插拔深化（provider / 关系库 / 缓存 / 队列）
+### Phase 7 — 可插拔深化（provider / 关系库 / 缓存 / 队列）✅ 已完成（2026-09-30）
 
 **目标**：把「可插拔」从口号变成可被第三方验证的能力——换后端不改业务代码。
 （向量库的接口化与 zvec 迁移已提前到 Phase 4，本阶段不再重复。）
@@ -328,6 +328,49 @@ changelog 与密钥自检）。
 
 **DoD**：至少一个真实第三方实现通过全部契约测试（zvec 已在 Phase 4 完成）；业务代码零改动；
 `/api/system/providers` 与 health 能反映插件状态。
+
+**as-built（2026-09-30）**
+
+四个提交，按插件点拆分（每个提交自带契约测试，G0 全绿后才提交）：
+
+| 提交 | 范围 | 关键点 |
+| --- | --- | --- |
+| `c84f83e` | 7.1 provider 注册表 | `plugins/registry.py`（泛型 `Registry[T]` + entry point 发现）；`specs._build` 分支改为查表；`chat.py` / `embeddings.py` 拆成「每后端一个构造器 + `*_BUILDERS` 查表」；provider 注册改为惰性（`_ensure_builtins`，避开 specs ↔ chat 的循环 import） |
+| `5820568` | 7.2 缓存抽象 | `CacheBackend` 契约（`get/set/invalidate/stats`）+ `MemoryCacheBackend`（每 namespace 一份有界 LRU）；`cache_backends` 注册表；通配失效对齐 Redis `SCAN MATCH` 语义（`1:*` 不误删 `11:*`） |
+| `614c8df` | 7.3 任务队列 | `TaskQueue` 契约（`start/stop/submit/status/summary`）+ `inprocess`（并发上限 + 退避重试 + 有界历史）与 `inline` 实现；取代 FastAPI `BackgroundTasks`；`process_document` 失败改为抛 `DocumentProcessingError` |
+| `65d795e` | 7.4 关系库仓储 | `repositories/`（四个聚合契约 + SQLAlchemy 实现 + `build_repositories`）；`core/access.py` 改依赖 `ACLReader` 协议；`api/`、`services/`、`scripts/` 全部收敛（`create_user.py` 是显式例外：口令写入属运维动作） |
+
+7.5 替换演练与状态接口也在 `65d795e` 之后一并落地（同一次提交收尾前的最后一批改动）：
+
+- **`memory` 向量库**（`services/vector_store/memory_store.py`）：零依赖进程内实现。
+  新增它只动了两个文件（实现类 + `__init__.py` 一行 `vector_stores.register`）加一行测试参数，
+  **业务代码零改动**，同一套 `tests/test_vector_store.py` 契约用例直接全绿（`store` fixture 从
+  2 个后端扩到 3 个）。它的边界（数据只在内存、实例间不共享、线性扫描）都有专门用例钉住。
+- **共享语义上移**：MMR（`maximal_marginal_relevance`）、余弦相似度、混合检索合并（`merge_hybrid`）
+  从 zvec 适配器私有函数提到 `base.py`，三个后端共用一份，避免各后端慢慢漂移出不同口径。
+- **`GET /api/system/plugins`**：遍历注册表，逐插件点报出 `configured` / `active` / `available` /
+  `third_party` / `entry_point_group`；`/api/system/health` 同步返回同一份报告，并把
+  「插件点配置写错」计入 `status=degraded`。每个 `Registry` 自带 `settings_key`，
+  所以这张「插件点 → 配置项」的映射表只有一处。
+- **测试**：`tests/test_repositories.py`（28 条）、`tests/test_plugins.py`（注册表语义 + 插件状态接口）、
+  `tests/test_vector_store.py`（+memory 参数与 3 条后端边界用例）。离线用例数 189 → **234**。
+
+DoD 对照：
+
+- 「至少一个真实第三方实现通过全部契约测试」——zvec（Phase 4）继续通过；本阶段新增的 `memory`
+  作为第二个实证，`store` fixture 参数化三个后端；
+- 「业务代码零改动」——`services/rag.py` 与 `api/*.py` 在 7.1–7.5 期间**没有一行是为接新后端而改**；
+- 「`/api/system/providers` 与 health 能反映插件状态」——`/providers` 的每个条目带 `third_party`
+  标记，health 返回完整插件报告并据此降级；新增 `/api/system/plugins` 作为权威查询入口。
+
+已知边界（写清楚，避免误判）：
+
+- `inprocess` 队列是进程内的：多副本部署时每个副本各跑各的任务，**没有跨副本的任务状态**；
+  需要跨副本一致性时换 arq / celery（契约已就位，换实现不改调用点）；
+- `memory` 向量库与进程内缓存同样不跨进程；`zvec` 内嵌写锁要求单进程，三者叠加的结果是
+  **当前部署形态必须是单进程**（`docs/architecture.md` 3.2 与风险登记簿已记）；
+- `create_user.py` 仍直接用 SQLAlchemy 会话读写用户表——刻意的例外，理由写在
+  `repositories/base.py` 的 `UserRepository` docstring 与脚本模块说明里。
 
 ### Phase 8 — 检索与回答质量提升（用评测集驱动）
 
