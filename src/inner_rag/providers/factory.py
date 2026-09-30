@@ -5,7 +5,9 @@
 * 惰性 + 缓存：同一份配置只构造一次客户端，避免每个请求都重建连接池；
 * 只读 .env（settings），不接受任何来自 HTTP 请求的 provider 参数，
   避免调用方指定任意 base_url（SSRF）；
-* 缺 Key / provider 非法统一抛 ``ProviderError``，由上层映射成 503 + 可读文案。
+* 缺 Key / provider 非法统一抛 ``ProviderError``，由上层映射成 503 + 可读文案；
+* 后端从插件注册表解析（``chat_plugin`` / ``embedding_plugin``），因此第三方 provider
+  只要注册了 spec + 构造器就能被这里用起来，工厂本身不需要知道有哪些 provider。
 """
 
 from __future__ import annotations
@@ -19,12 +21,12 @@ from langchain_core.language_models.chat_models import BaseChatModel
 from loguru import logger
 
 from inner_rag.core.config import settings
-from inner_rag.providers.chat import build_chat_model
-from inner_rag.providers.embeddings import build_embeddings
 from inner_rag.providers.specs import (
     ProviderError,
     ProviderSpec,
+    chat_plugin,
     chat_spec,
+    embedding_plugin,
     embedding_spec,
 )
 
@@ -46,7 +48,8 @@ def _fingerprint(secret: str) -> str:
 
 def get_chat_model(provider: str | None = None) -> BaseChatModel:
     """获取 chat 模型实例（进程内复用）。"""
-    spec = chat_spec(provider)
+    plugin = chat_plugin(provider)
+    spec = plugin.spec()
     cache_key = (
         f"chat|{spec.identity}|{spec.base_url}|{_fingerprint(spec.api_key)}"
         f"|{settings.LLM_TEMPERATURE}|{settings.LLM_MAX_TOKENS}"
@@ -54,21 +57,24 @@ def get_chat_model(provider: str | None = None) -> BaseChatModel:
     )
     model = _CACHE.get(cache_key)
     if model is None:
-        model = build_chat_model(spec)
+        logger.info(f"[LLM] 构造 {spec.identity} base_url={spec.base_url or '-'}")
+        model = plugin.build(spec)
         _CACHE[cache_key] = model
     return cast(BaseChatModel, model)
 
 
 def get_embeddings(provider: str | None = None) -> Embeddings:
     """获取 embedding 实例（进程内复用）。"""
-    spec = embedding_spec(provider)
+    plugin = embedding_plugin(provider)
+    spec = plugin.spec()
     cache_key = (
         f"embed|{spec.identity}|{spec.base_url}|{_fingerprint(spec.api_key)}"
         f"|{settings.EMBEDDING_MAX_INPUT_CHARS}"
     )
     embeddings = _CACHE.get(cache_key)
     if embeddings is None:
-        embeddings = build_embeddings(spec)
+        logger.info(f"[EMBEDDING] 构造 {spec.identity} base_url={spec.base_url or '-'}")
+        embeddings = plugin.build(spec)
         _CACHE[cache_key] = embeddings
     return cast(Embeddings, embeddings)
 

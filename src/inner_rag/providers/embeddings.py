@@ -6,6 +6,8 @@
 * Mock 为本项目自带的确定性离线向量，用于本地演示与测试；
 * 可选按字符数截断超长输入（``EMBEDDING_MAX_INPUT_CHARS``），避免超出小上下文
   模型的窗口（例如 liquid/lfm-2.5-embedding-350m:free 只有 512 token）。
+
+与 chat 一样，Phase 7 起构造器按名字进 ``EMBEDDING_BUILDERS`` 查表，不再有 if 分支分发。
 """
 
 from __future__ import annotations
@@ -13,6 +15,8 @@ from __future__ import annotations
 import hashlib
 import math
 import re
+from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from langchain_core.embeddings import Embeddings
 from langchain_ollama import OllamaEmbeddings
@@ -21,7 +25,9 @@ from loguru import logger
 from pydantic import SecretStr
 
 from inner_rag.core.config import settings
-from inner_rag.providers.specs import ProviderSpec
+
+if TYPE_CHECKING:  # 只在类型检查时引入，避免 specs <-> embeddings 的 import 环
+    from inner_rag.providers.specs import ProviderSpec
 
 _WORD_RE = re.compile(r"[a-z0-9_]+")
 _CJK_CHAR_RE = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
@@ -102,23 +108,40 @@ class TruncatingEmbeddings(Embeddings):
         return await self._inner.aembed_query(self._clip(text))
 
 
-def build_embeddings(spec: ProviderSpec) -> Embeddings:
-    """按 spec 构造 embeddings（不发起任何网络请求）。"""
-    logger.info(f"[EMBEDDING] provider={spec.identity} base_url={spec.base_url or '-'}")
+def _with_truncation(embeddings: Embeddings) -> Embeddings:
+    """按配置给后端套上截断包装（0 表示不截断）。"""
+    if settings.EMBEDDING_MAX_INPUT_CHARS > 0:
+        return TruncatingEmbeddings(embeddings, settings.EMBEDDING_MAX_INPUT_CHARS)
+    return embeddings
 
-    if spec.name == "mock":
-        embeddings: Embeddings = MockEmbeddings()
-    elif spec.name == "ollama":
-        embeddings = OllamaEmbeddings(base_url=spec.base_url, model=spec.model)
-    else:
-        embeddings = OpenAIEmbeddings(
+
+# ── 各后端的构造器（不发起任何网络请求）────────────────────────────────
+
+
+def build_mock_embeddings(spec: ProviderSpec) -> Embeddings:
+    return _with_truncation(MockEmbeddings())
+
+
+def build_ollama_embeddings(spec: ProviderSpec) -> Embeddings:
+    return _with_truncation(OllamaEmbeddings(base_url=spec.base_url, model=spec.model))
+
+
+def build_openai_compatible_embeddings(spec: ProviderSpec) -> Embeddings:
+    """OpenRouter / OpenAI 这类 OpenAI 兼容后端共用的构造器。"""
+    return _with_truncation(
+        OpenAIEmbeddings(
             base_url=spec.base_url,
             model=spec.model,
             api_key=SecretStr(spec.api_key),
             # 上游不一定是 OpenAI 官方模型，跳过 tiktoken 的上下文长度校验
             check_embedding_ctx_length=False,
         )
+    )
 
-    if settings.EMBEDDING_MAX_INPUT_CHARS > 0:
-        embeddings = TruncatingEmbeddings(embeddings, settings.EMBEDDING_MAX_INPUT_CHARS)
-    return embeddings
+
+EMBEDDING_BUILDERS: dict[str, Callable[[ProviderSpec], Embeddings]] = {
+    "ollama": build_ollama_embeddings,
+    "openrouter": build_openai_compatible_embeddings,
+    "openai": build_openai_compatible_embeddings,
+    "mock": build_mock_embeddings,
+}

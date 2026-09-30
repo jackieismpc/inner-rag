@@ -6,12 +6,15 @@
 * OpenRouter / OpenAI 都是 OpenAI 兼容接口，统一走 ``langchain-openai`` 的
   ChatOpenAI，只换 ``base_url`` 与 ``model``；
 * Mock 是本项目自带的离线模型，用于本地演示、CI 与降级验收。
+
+Phase 7 起不再有 ``if name == ...`` 的分发函数：构造器按名字进 ``CHAT_BUILDERS`` 查表，
+由 ``providers/specs.py`` 连同 spec 一起注册进插件注册表（第三方实现走 entry point）。
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Callable, Iterator
+from typing import TYPE_CHECKING, Any
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -20,11 +23,12 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langchain_deepseek import ChatDeepSeek
 from langchain_ollama import ChatOllama
 from langchain_openai import ChatOpenAI
-from loguru import logger
 from pydantic import SecretStr
 
 from inner_rag.core.config import settings
-from inner_rag.providers.specs import ProviderSpec
+
+if TYPE_CHECKING:  # 只在类型检查时引入，避免 specs <-> chat 的 import 环
+    from inner_rag.providers.specs import ProviderSpec
 
 # OpenRouter 用它做应用归因（不参与计费，便于在后台区分流量来源）
 OPENROUTER_HEADERS = {"X-Title": settings.APP_NAME}
@@ -91,37 +95,40 @@ class MockChatModel(BaseChatModel):
             yield ChatGenerationChunk(message=AIMessageChunk(content=piece))
 
 
-def build_chat_model(spec: ProviderSpec) -> BaseChatModel:
-    """按 spec 构造 chat 模型（不发起任何网络请求）。"""
-    logger.info(f"[LLM] provider={spec.identity} base_url={spec.base_url or '-'}")
+# ── 各后端的构造器（不发起任何网络请求）────────────────────────────────
 
-    if spec.name == "mock":
-        return MockChatModel(model_name=spec.model)
 
-    if spec.name == "ollama":
-        # LangChain 1.x 的 ChatOllama 不再有 streaming 初始化参数，流式与否由调用方决定
-        return ChatOllama(
-            base_url=spec.base_url,
-            model=spec.model,
-            temperature=settings.LLM_TEMPERATURE,
-            num_predict=settings.LLM_MAX_TOKENS,
-        )
+def build_mock_chat(spec: ProviderSpec) -> BaseChatModel:
+    return MockChatModel(model_name=spec.model)
 
-    if spec.name == "deepseek":
-        # 官方集成：输出长度字段是 max_tokens（不是兼容层的 max_completion_tokens）
-        return ChatDeepSeek(
-            base_url=spec.base_url,
-            model=spec.model,
-            api_key=SecretStr(spec.api_key),
-            temperature=settings.LLM_TEMPERATURE,
-            max_tokens=settings.LLM_MAX_TOKENS,
-            timeout=settings.LLM_TIMEOUT,
-            max_retries=settings.LLM_MAX_RETRIES,
-            # 留空表示不下发该参数（DeepSeek 默认行为）
-            reasoning_effort=settings.LLM_REASONING_EFFORT.strip() or None,
-        )
 
-    headers = OPENROUTER_HEADERS if spec.name == "openrouter" else None
+def build_ollama_chat(spec: ProviderSpec) -> BaseChatModel:
+    # LangChain 1.x 的 ChatOllama 不再有 streaming 初始化参数，流式与否由调用方决定
+    return ChatOllama(
+        base_url=spec.base_url,
+        model=spec.model,
+        temperature=settings.LLM_TEMPERATURE,
+        num_predict=settings.LLM_MAX_TOKENS,
+    )
+
+
+def build_deepseek_chat(spec: ProviderSpec) -> BaseChatModel:
+    # 官方集成：输出长度字段是 max_tokens（不是兼容层的 max_completion_tokens）
+    return ChatDeepSeek(
+        base_url=spec.base_url,
+        model=spec.model,
+        api_key=SecretStr(spec.api_key),
+        temperature=settings.LLM_TEMPERATURE,
+        max_tokens=settings.LLM_MAX_TOKENS,
+        timeout=settings.LLM_TIMEOUT,
+        max_retries=settings.LLM_MAX_RETRIES,
+        # 留空表示不下发该参数（DeepSeek 默认行为）
+        reasoning_effort=settings.LLM_REASONING_EFFORT.strip() or None,
+    )
+
+
+def build_openai_compatible_chat(spec: ProviderSpec) -> BaseChatModel:
+    """OpenRouter / OpenAI 这类 OpenAI 兼容后端共用的构造器。"""
     return ChatOpenAI(
         base_url=spec.base_url,
         model=spec.model,
@@ -132,5 +139,14 @@ def build_chat_model(spec: ProviderSpec) -> BaseChatModel:
         # 字段名是 request_timeout，构造参数的别名才是 timeout
         timeout=settings.LLM_TIMEOUT,
         max_retries=settings.LLM_MAX_RETRIES,
-        default_headers=headers,
+        default_headers=OPENROUTER_HEADERS if spec.name == "openrouter" else None,
     )
+
+
+CHAT_BUILDERS: dict[str, Callable[[ProviderSpec], BaseChatModel]] = {
+    "ollama": build_ollama_chat,
+    "openrouter": build_openai_compatible_chat,
+    "deepseek": build_deepseek_chat,
+    "openai": build_openai_compatible_chat,
+    "mock": build_mock_chat,
+}
