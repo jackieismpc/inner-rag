@@ -1,23 +1,23 @@
 <template>
   <div class="flex flex-col h-full">
     <!-- Header -->
-    <div class="flex-shrink-0 flex items-center gap-3 px-6 py-4 border-b border-gray-100 bg-white">
+    <div class="flex-shrink-0 flex items-center gap-3 px-7 py-5">
       <button class="btn-ghost p-1.5" @click="$router.push('/kb')">
         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
           <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
         </svg>
       </button>
-      <div class="w-8 h-8 rounded-lg bg-primary-50 flex items-center justify-center text-lg flex-shrink-0">
+      <div class="w-10 h-10 rounded-2xl bg-primary-50 flex items-center justify-center text-xl flex-shrink-0">
         {{ kb?.icon || '📚' }}
       </div>
       <div class="flex-1 min-w-0">
         <div class="flex items-center gap-2">
-          <h1 class="text-base font-semibold text-gray-900 truncate">{{ kb?.name }}</h1>
+          <h1 class="text-lg font-bold text-neutral-900 truncate tracking-tight">{{ kb?.name }}</h1>
           <span v-if="kb && !isOwner" :class="permissionBadge(kb.my_permission)">
             {{ permissionLabel(kb.my_permission) }}
           </span>
         </div>
-        <p class="text-xs text-gray-500 truncate">{{ kb?.description || '暂无描述' }}</p>
+        <p class="text-[13px] text-neutral-500 truncate">{{ kb?.description || '暂无描述' }}</p>
       </div>
       <div class="flex gap-2">
         <!-- 成员管理仅拥有者可见：成员列表接口也要求 owner 权限 -->
@@ -43,41 +43,41 @@
     </div>
 
     <!-- Stats -->
-    <div class="flex-1 overflow-auto p-6">
-      <div class="grid grid-cols-3 gap-4 mb-6" v-if="kb">
-        <div class="card p-4">
-          <p class="text-xs text-gray-500 mb-1">文档总数</p>
-          <p class="text-2xl font-bold text-gray-900">{{ kb.doc_count }}</p>
+    <div class="flex-1 overflow-auto p-7">
+      <div class="grid grid-cols-3 gap-5 mb-7" v-if="kb">
+        <div class="card p-5">
+          <p class="text-[13px] text-neutral-500 mb-1.5">文档总数</p>
+          <p class="text-3xl font-bold text-neutral-900 tracking-tight">{{ kb.doc_count }}</p>
         </div>
-        <div class="card p-4">
-          <p class="text-xs text-gray-500 mb-1">向量数量</p>
-          <p class="text-2xl font-bold text-primary-600">{{ kb.vector_count ?? '-' }}</p>
+        <div class="card p-5">
+          <p class="text-[13px] text-neutral-500 mb-1.5">向量数量</p>
+          <p class="text-3xl font-bold text-primary-600 tracking-tight">{{ kb.vector_count ?? '-' }}</p>
         </div>
-        <div class="card p-4">
-          <p class="text-xs text-gray-500 mb-1">嵌入模型</p>
-          <p class="text-sm font-medium text-gray-700 mt-1 truncate">{{ kb.embedding_model }}</p>
+        <div class="card p-5">
+          <p class="text-[13px] text-neutral-500 mb-1.5">嵌入模型</p>
+          <p class="text-sm font-medium text-neutral-700 mt-2 truncate">{{ kb.embedding_model }}</p>
         </div>
       </div>
 
       <!-- Recent docs -->
       <div class="card overflow-hidden">
-        <div class="flex items-center justify-between px-4 py-3 border-b border-gray-50">
-          <span class="text-sm font-medium text-gray-700">最近文档</span>
-          <button class="text-xs text-primary-600 hover:text-primary-700" @click="$router.push(`/kb/${id}/docs`)">
+        <div class="flex items-center justify-between px-5 py-4 border-b border-neutral-100">
+          <span class="text-[15px] font-semibold text-neutral-800">最近文档</span>
+          <button class="text-[13px] font-medium text-primary-600 hover:text-primary-700" @click="$router.push(`/kb/${id}/docs`)">
             查看全部 →
           </button>
         </div>
-        <div v-if="docs.length" class="divide-y divide-gray-50">
-          <div v-for="doc in docs" :key="doc.id" class="flex items-center gap-3 px-4 py-3 hover:bg-gray-50">
+        <div v-if="docs.length" class="divide-y divide-neutral-100">
+          <div v-for="doc in docs" :key="doc.id" class="flex items-center gap-3 px-5 py-3.5 hover:bg-neutral-50 transition-colors">
             <span class="text-base flex-shrink-0">{{ fileIcon(doc.file_type) }}</span>
             <div class="flex-1 min-w-0">
-              <p class="text-sm text-gray-800 truncate">{{ doc.filename }}</p>
-              <p class="text-xs text-gray-400">{{ doc.chunk_count }} 块 · {{ formatSize(doc.file_size) }}</p>
+              <p class="text-sm text-neutral-800 truncate">{{ doc.filename }}</p>
+              <p class="text-xs text-neutral-400">{{ doc.chunk_count }} 块 · {{ formatSize(doc.file_size) }}</p>
             </div>
             <span :class="statusBadge(doc.status)">{{ statusLabel(doc.status) }}</span>
           </div>
         </div>
-        <div v-else class="py-10 text-center text-sm text-gray-400">暂无文档，去文档管理页上传</div>
+        <div v-else class="py-10 text-center text-sm text-neutral-400">暂无文档，去文档管理页上传</div>
       </div>
     </div>
 

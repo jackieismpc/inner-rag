@@ -4,62 +4,87 @@
 
 @layer base {
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
-    @apply bg-gray-50 text-gray-900;
-    font-family: "PingFang SC", "HarmonyOS Sans", "Microsoft YaHei", system-ui, sans-serif;
+    @apply bg-neutral-50 text-neutral-800 antialiased;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+      "PingFang SC", "HarmonyOS Sans", "Microsoft YaHei", system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    letter-spacing: -0.01em;
   }
-  ::-webkit-scrollbar { width: 5px; height: 5px; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
   ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-thumb { @apply bg-gray-300 rounded-full; }
+  ::-webkit-scrollbar-thumb { @apply bg-neutral-200 rounded-full; }
+  ::-webkit-scrollbar-thumb:hover { @apply bg-neutral-300; }
 }
 
 @layer components {
+  /* 按钮：Apple 风胶囊圆角 + 细腻回弹 */
   .btn {
-    @apply inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-sm font-medium
-           transition-all duration-150 cursor-pointer select-none disabled:opacity-50 disabled:cursor-not-allowed;
+    @apply inline-flex items-center gap-1.5 px-4 py-2 rounded-full text-sm font-medium
+           transition-all duration-200 cursor-pointer select-none
+           disabled:opacity-40 disabled:cursor-not-allowed
+           active:scale-[0.97];
   }
   .btn-primary {
-    @apply btn bg-primary-600 text-white hover:bg-primary-700 active:bg-primary-800;
+    @apply btn bg-primary-600 text-white shadow-primary-glow
+           hover:bg-primary-500 hover:shadow-[0_6px_20px_rgba(0,113,227,0.35)]
+           active:bg-primary-700;
   }
   .btn-ghost {
-    @apply btn text-gray-600 hover:bg-gray-100 active:bg-gray-200;
+    @apply btn text-neutral-600 hover:bg-neutral-100 active:bg-neutral-200;
   }
   .btn-danger {
-    @apply btn text-red-600 hover:bg-red-50 active:bg-red-100;
+    @apply btn text-danger hover:bg-red-50 active:bg-red-100;
   }
+
+  /* 卡片：大圆角 + 柔和多层阴影 */
   .card {
-    @apply bg-white rounded-xl border border-gray-100 shadow-sm;
+    @apply bg-white rounded-2xl border border-neutral-100 shadow-card;
   }
+
+  /* 毛玻璃面板（侧边栏 / 顶栏） */
+  .glass {
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: saturate(180%) blur(20px);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+  }
+
+  /* 输入框：Apple 风大圆角 + 柔和聚焦环 */
   .input {
-    @apply w-full px-3 py-2 rounded-lg border border-gray-200 text-sm
-           focus:outline-none focus:ring-2 focus:ring-primary-500/30 focus:border-primary-400
-           placeholder:text-gray-400 bg-white transition;
+    @apply w-full px-3.5 py-2 rounded-xl border border-neutral-200 text-sm
+           bg-white transition
+           focus:outline-none focus:ring-4 focus:ring-primary-500/15 focus:border-primary-400
+           placeholder:text-neutral-300;
   }
+
+  /* 徽章：胶囊 + 半透明底色 */
   .badge {
-    @apply inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium;
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
   }
-  .badge-green  { @apply badge bg-green-50 text-green-700; }
-  .badge-blue   { @apply badge bg-blue-50 text-blue-700; }
-  .badge-yellow { @apply badge bg-yellow-50 text-yellow-700; }
-  .badge-red    { @apply badge bg-red-50 text-red-700; }
-  .badge-gray   { @apply badge bg-gray-100 text-gray-600; }
+  .badge-green  { @apply badge bg-emerald-50 text-emerald-700; }
+  .badge-blue   { @apply badge bg-primary-50 text-primary-700; }
+  .badge-yellow { @apply badge bg-amber-50 text-amber-700; }
+  .badge-red    { @apply badge bg-red-50 text-red-600; }
+  .badge-gray   { @apply badge bg-neutral-100 text-neutral-500; }
 }
 
 /* Markdown content */
-.prose-rag { @apply text-sm leading-relaxed text-gray-800; }
+.prose-rag { @apply text-sm leading-relaxed text-neutral-700; }
 .prose-rag p  { @apply mb-3; }
-.prose-rag h1, .prose-rag h2, .prose-rag h3 { @apply font-semibold mb-2 mt-4; }
+.prose-rag h1, .prose-rag h2, .prose-rag h3 { @apply font-semibold mb-2 mt-4 text-neutral-800; }
 .prose-rag h1 { @apply text-lg; }
 .prose-rag h2 { @apply text-base; }
 .prose-rag ul { @apply list-disc pl-4 mb-3 space-y-1; }
 .prose-rag ol { @apply list-decimal pl-4 mb-3 space-y-1; }
-.prose-rag code { @apply bg-gray-100 px-1 py-0.5 rounded text-xs font-mono text-primary-700; }
-.prose-rag pre { @apply bg-gray-900 text-gray-100 p-3 rounded-lg text-xs overflow-x-auto mb-3; }
+.prose-rag code { @apply bg-neutral-100 px-1.5 py-0.5 rounded-md text-xs font-mono text-primary-700; }
+.prose-rag pre { @apply bg-neutral-800 text-neutral-100 p-3 rounded-xl text-xs overflow-x-auto mb-3; }
 .prose-rag pre code { @apply bg-transparent text-inherit px-0 py-0; }
-.prose-rag blockquote { @apply border-l-4 border-primary-200 pl-3 text-gray-500 italic mb-3; }
+.prose-rag blockquote { @apply border-l-4 border-primary-200 pl-3 text-neutral-500 italic mb-3; }
 .prose-rag table { @apply w-full text-xs border-collapse mb-3; }
-.prose-rag th { @apply bg-gray-50 border border-gray-200 px-2 py-1 text-left font-medium; }
-.prose-rag td { @apply border border-gray-200 px-2 py-1; }
+.prose-rag th { @apply bg-neutral-50 border border-neutral-200 px-2 py-1 text-left font-medium; }
+.prose-rag td { @apply border border-neutral-200 px-2 py-1; }
 
 /* Typing animation */
 @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
@@ -67,5 +92,9 @@
 
 /* Fade slide transitions */
 .fade-enter-active, .fade-leave-active { transition: opacity 0.2s, transform 0.2s; }
-.fade-enter-from { opacity: 0; transform: translateY(4px); }
-.fade-leave-to   { opacity: 0; }
+.fade-enter-from { opacity: 0; transform: translateY(6px); }
+.fade-leave-to   { opacity: 0; transform: translateY(-4px); }
+
+/* 路由切换淡入 */
+.page-enter-active, .page-leave-active { transition: opacity 0.18s ease; }
+.page-enter-from, .page-leave-to { opacity: 0; }

@@ -1,10 +1,10 @@
 <template>
   <div class="flex flex-col h-full overflow-auto">
     <!-- Header -->
-    <div class="flex-shrink-0 flex items-center justify-between px-8 py-5 border-b border-gray-100 bg-white">
+    <div class="flex-shrink-0 flex items-center justify-between px-8 py-6">
       <div>
-        <h1 class="text-lg font-semibold text-gray-900">知识库</h1>
-        <p class="text-xs text-gray-500 mt-0.5">管理企业文档，构建智能知识检索</p>
+        <h1 class="text-2xl font-bold text-neutral-900 tracking-tight">知识库</h1>
+        <p class="text-sm text-neutral-500 mt-1">管理企业文档，构建智能知识检索</p>
       </div>
       <button class="btn-primary" @click="showCreate = true">
         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
@@ -15,13 +15,13 @@
     </div>
 
     <!-- Search -->
-    <div class="flex-shrink-0 px-8 py-4">
+    <div class="flex-shrink-0 px-8 pb-5">
       <div class="relative max-w-xs">
-        <svg class="absolute left-2.5 top-2.5 w-4 h-4 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <svg class="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
           <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M17 11A6 6 0 115 11a6 6 0 0112 0z"/>
         </svg>
         <input v-model="keyword" @input="onSearch" placeholder="搜索知识库..."
-          class="input pl-8 text-sm h-9" />
+          class="input pl-9 text-sm h-10" />
       </div>
     </div>
 
@@ -31,20 +31,20 @@
         <Spinner />
       </div>
 
-      <div v-else-if="!kbs.length" class="flex flex-col items-center justify-center h-48 text-gray-400">
+      <div v-else-if="!kbs.length" class="flex flex-col items-center justify-center h-48 text-neutral-400">
         <svg class="w-12 h-12 mb-3 opacity-30" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1">
           <path stroke-linecap="round" stroke-linejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.746 0 3.332.477 4.5 1.253v13C19.832 18.477 18.246 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"/>
         </svg>
         <p class="text-sm">还没有知识库，点击右上角新建</p>
       </div>
 
-      <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-5">
         <div v-for="kb in kbs" :key="kb.id"
-          class="card p-4 hover:shadow-md hover:border-primary-100 transition-all cursor-pointer group"
+          class="card p-5 hover:shadow-float hover:-translate-y-0.5 transition-all duration-200 cursor-pointer group"
           @click="$router.push(`/kb/${kb.id}`)">
 
-          <div class="flex items-start justify-between mb-3">
-            <div class="w-10 h-10 rounded-xl bg-primary-50 flex items-center justify-center text-xl flex-shrink-0">
+          <div class="flex items-start justify-between mb-4">
+            <div class="w-11 h-11 rounded-2xl bg-primary-50 flex items-center justify-center text-2xl flex-shrink-0">
               {{ kb.icon }}
             </div>
             <!-- 改设置 / 删库是拥有者专属：成员看到按钮也只会在后端拿到 403 -->
@@ -63,11 +63,11 @@
             </div>
           </div>
 
-          <h3 class="font-medium text-gray-900 text-sm mb-1 line-clamp-1">{{ kb.name }}</h3>
-          <p class="text-xs text-gray-500 line-clamp-2 min-h-[32px]">{{ kb.description || '暂无描述' }}</p>
+          <h3 class="font-semibold text-neutral-900 text-[15px] mb-1 line-clamp-1">{{ kb.name }}</h3>
+          <p class="text-[13px] text-neutral-500 line-clamp-2 min-h-[36px]">{{ kb.description || '暂无描述' }}</p>
 
-          <div class="mt-3 pt-3 border-t border-gray-50 flex items-center justify-between">
-            <span class="text-xs text-gray-400">{{ kb.doc_count }} 篇文档</span>
+          <div class="mt-4 pt-4 border-t border-neutral-100 flex items-center justify-between">
+            <span class="text-xs text-neutral-400">{{ kb.doc_count }} 篇文档</span>
             <div class="flex items-center gap-1">
               <span v-if="kb.my_permission !== 'owner'"
                 :class="kb.my_permission === 'write' ? 'badge-blue' : 'badge-gray'">

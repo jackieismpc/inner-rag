@@ -1,15 +1,15 @@
 <template>
   <div class="flex flex-col h-full">
     <!-- Header -->
-    <div class="flex-shrink-0 flex items-center gap-3 px-6 py-4 border-b border-gray-100 bg-white">
+    <div class="flex-shrink-0 flex items-center gap-3 px-7 py-5">
       <button class="btn-ghost p-1.5" @click="$router.push(`/kb/${id}`)">
         <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
           <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7"/>
         </svg>
       </button>
       <div class="flex-1">
-        <h1 class="text-base font-semibold text-gray-900">文档管理</h1>
-        <p class="text-xs text-gray-500">上传和管理知识库文档</p>
+        <h1 class="text-lg font-bold text-neutral-900 tracking-tight">文档管理</h1>
+        <p class="text-[13px] text-neutral-500">上传和管理知识库文档</p>
       </div>
       <div class="flex items-center gap-2">
         <!-- 上传/导入/删除/重新解析都是写权限：只读成员看不到入口（后端也会拦） -->
@@ -33,7 +33,7 @@
     </div>
 
     <!-- Upload progress area -->
-    <div v-if="uploading" class="flex-shrink-0 mx-6 mt-4 p-3 rounded-xl bg-primary-50 border border-primary-100 flex items-center gap-3">
+    <div v-if="uploading" class="flex-shrink-0 mx-7 mt-4 p-3.5 rounded-2xl bg-primary-50 border border-primary-100 flex items-center gap-3">
       <Spinner class="w-4 h-4 text-primary-600" />
       <span class="text-sm text-primary-700">正在上传文件... {{ uploadProgress }}%</span>
       <div class="flex-1 h-1.5 bg-primary-100 rounded-full overflow-hidden">
@@ -42,9 +42,9 @@
     </div>
 
     <!-- Filters -->
-    <div class="flex-shrink-0 flex items-center gap-3 px-6 py-3">
+    <div class="flex-shrink-0 flex items-center gap-3 px-7 py-4">
       <div class="relative">
-        <svg class="absolute left-2.5 top-2.5 w-3.5 h-3.5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <svg class="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-neutral-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
           <path stroke-linecap="round" stroke-linejoin="round" d="M21 21l-4.35-4.35M17 11A6 6 0 115 11a6 6 0 0112 0z"/>
         </svg>
         <input v-model="keyword" @input="onSearch" placeholder="搜索文档..."
@@ -66,47 +66,47 @@
     </div>
 
     <!-- Table -->
-    <div class="flex-1 overflow-auto px-6 pb-6">
+    <div class="flex-1 overflow-auto px-7 pb-7">
       <div class="card overflow-hidden">
         <table class="w-full text-sm">
           <thead>
-            <tr class="border-b border-gray-100">
-              <th class="text-left px-4 py-3 text-xs font-medium text-gray-500">文件名</th>
-              <th class="text-left px-4 py-3 text-xs font-medium text-gray-500">类型</th>
-              <th class="text-left px-4 py-3 text-xs font-medium text-gray-500">大小</th>
-              <th class="text-left px-4 py-3 text-xs font-medium text-gray-500">分块</th>
-              <th class="text-left px-4 py-3 text-xs font-medium text-gray-500">来源</th>
-              <th class="text-left px-4 py-3 text-xs font-medium text-gray-500">状态</th>
-              <th class="text-left px-4 py-3 text-xs font-medium text-gray-500">时间</th>
+            <tr class="border-b border-neutral-100 bg-neutral-50/60">
+              <th class="text-left px-5 py-3 text-xs font-medium text-neutral-500">文件名</th>
+              <th class="text-left px-4 py-3 text-xs font-medium text-neutral-500">类型</th>
+              <th class="text-left px-4 py-3 text-xs font-medium text-neutral-500">大小</th>
+              <th class="text-left px-4 py-3 text-xs font-medium text-neutral-500">分块</th>
+              <th class="text-left px-4 py-3 text-xs font-medium text-neutral-500">来源</th>
+              <th class="text-left px-4 py-3 text-xs font-medium text-neutral-500">状态</th>
+              <th class="text-left px-4 py-3 text-xs font-medium text-neutral-500">时间</th>
               <th class="px-4 py-3"></th>
             </tr>
           </thead>
-          <tbody class="divide-y divide-gray-50">
+          <tbody class="divide-y divide-neutral-100">
             <tr v-if="loading">
               <td colspan="8" class="py-12 text-center"><Spinner /></td>
             </tr>
             <tr v-else-if="!docs.length">
-              <td colspan="8" class="py-12 text-center text-sm text-gray-400">暂无文档</td>
+              <td colspan="8" class="py-12 text-center text-sm text-neutral-400">暂无文档</td>
             </tr>
-            <tr v-for="doc in docs" :key="doc.id" class="hover:bg-gray-50 transition-colors">
-              <td class="px-4 py-3">
+            <tr v-for="doc in docs" :key="doc.id" class="hover:bg-neutral-50 transition-colors">
+              <td class="px-5 py-3.5">
                 <div class="flex items-center gap-2">
                   <span class="text-base">{{ fileIcon(doc.file_type) }}</span>
                   <div class="min-w-0">
-                    <p class="text-sm text-gray-800 truncate max-w-[200px]" :title="doc.filename">{{ doc.filename }}</p>
+                    <p class="text-sm text-neutral-800 truncate max-w-[200px]" :title="doc.filename">{{ doc.filename }}</p>
                     <p v-if="doc.error_msg" class="text-xs text-red-500 truncate max-w-[200px]" :title="doc.error_msg">{{ doc.error_msg }}</p>
                   </div>
                 </div>
               </td>
-              <td class="px-4 py-3 text-xs text-gray-500 uppercase">{{ doc.file_type || '-' }}</td>
-              <td class="px-4 py-3 text-xs text-gray-500">{{ formatSize(doc.file_size) }}</td>
-              <td class="px-4 py-3 text-xs text-gray-500">{{ doc.chunk_count || '-' }}</td>
-              <td class="px-4 py-3">
+              <td class="px-4 py-3.5 text-xs text-neutral-500 uppercase">{{ doc.file_type || '-' }}</td>
+              <td class="px-4 py-3.5 text-xs text-neutral-500">{{ formatSize(doc.file_size) }}</td>
+              <td class="px-4 py-3.5 text-xs text-neutral-500">{{ doc.chunk_count || '-' }}</td>
+              <td class="px-4 py-3.5">
                 <span :class="doc.source_type === 'upload' ? 'badge-blue' : 'badge-gray'">
                   {{ doc.source_type === 'upload' ? '上传' : '本地' }}
                 </span>
               </td>
-              <td class="px-4 py-3">
+              <td class="px-4 py-3.5">
                 <div class="flex items-center gap-1.5">
                   <span class="w-1.5 h-1.5 rounded-full flex-shrink-0"
                     :class="{ 'bg-green-400': doc.status==='completed', 'bg-blue-400 animate-pulse': doc.status==='processing',
@@ -114,8 +114,8 @@
                   <span :class="statusBadge(doc.status)">{{ statusLabel(doc.status) }}</span>
                 </div>
               </td>
-              <td class="px-4 py-3 text-xs text-gray-400">{{ formatDate(doc.created_at) }}</td>
-              <td class="px-4 py-3">
+              <td class="px-4 py-3.5 text-xs text-neutral-400">{{ formatDate(doc.created_at) }}</td>
+              <td class="px-4 py-3.5">
                 <div v-if="canWrite" class="flex gap-1 justify-end">
                   <button v-if="doc.status === 'failed'" class="btn-ghost p-1" title="重新处理"
                     @click="reprocess(doc)">
