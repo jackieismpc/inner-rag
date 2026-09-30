@@ -76,18 +76,23 @@ def _offline_env(workdir: Path) -> None:
     )
 
 
-def _item_result(item: dict[str, Any], pages: list[int], filtered_out: int, ms: float) -> dict:
+def _item_result(
+    item: dict[str, Any], spans: list[tuple[int, int]], filtered_out: int, ms: float
+) -> dict:
     expected = ds.expected_pages(item)
+    # 命中判定按页区间算（当前切分不跨页，区间退化为单点）；
+    # retrieved_pages 保留单点列表，是为了让旧结果 JSON 与人工核对仍然可读。
     return {
         "id": item["id"],
         "question": item["question"],
         "category": item["category"],
         "expect_refusal": item["expect_refusal"],
-        "retrieved_pages": pages,
+        "retrieved_pages": [span[0] for span in spans],
+        "retrieved_spans": [[span[0], span[1]] for span in spans],
         "filtered_out": filtered_out,
-        "hit": metrics.pages_hit(pages, expected),
-        "rr": metrics.reciprocal_rank(pages, expected),
-        "page_hit": metrics.page_hit_rate(pages, expected),
+        "hit": metrics.spans_hit(spans, expected),
+        "rr": metrics.spans_reciprocal_rank(spans, expected),
+        "page_hit": metrics.spans_page_hit_rate(spans, expected),
         "retrieval_ms": ms,
         "answer": None,
         "keyword_coverage": None,
@@ -95,7 +100,26 @@ def _item_result(item: dict[str, Any], pages: list[int], filtered_out: int, ms: 
         "refusal": None,
         "citation_precision": None,
         "total_ms": None,
+        "context": "",
+        "judge_correct": None,
+        "judge_reason": None,
+        "faithfulness": None,
+        "prompt_tokens": None,
+        "completion_tokens": None,
+        "cost_usd": None,
     }
+
+
+def _spans_of(hits: list[tuple[Any, float | None]]) -> list[tuple[int, int]]:
+    """召回结果 -> 页区间列表（无页码的分块直接跳过，不参与命中判定）。"""
+    from inner_rag.services.vector_store.base import page_span
+
+    spans = []
+    for doc, _score in hits:
+        span = page_span(doc)
+        if span is not None:
+            spans.append(span)
+    return spans
 
 
 async def run_fixtures(
@@ -128,8 +152,7 @@ async def run_fixtures(
             score_threshold=args.threshold,
         )
         elapsed = (time.perf_counter() - started) * 1000
-        pages = [int(doc.metadata["page"]) for doc, _ in hits if doc.metadata.get("page")]
-        results.append(_item_result(item, pages, filtered_out, elapsed))
+        results.append(_item_result(item, _spans_of(hits), filtered_out, elapsed))
     return results
 
 
@@ -169,8 +192,7 @@ async def run_kb(args: argparse.Namespace, items: list[dict]) -> list[dict]:
             score_threshold=args.threshold,
         )
         elapsed = (time.perf_counter() - started) * 1000
-        pages = [int(doc.metadata["page"]) for doc, _ in hits if doc.metadata.get("page")]
-        result = _item_result(item, pages, filtered_out, elapsed)
+        result = _item_result(item, _spans_of(hits), filtered_out, elapsed)
 
         if args.answer:
             from inner_rag.services.rag import rag_service
@@ -181,14 +203,25 @@ async def run_kb(args: argparse.Namespace, items: list[dict]) -> list[dict]:
             )
             result["total_ms"] = (time.perf_counter() - began) * 1000
             result["answer"] = answer
-            cited = [int(s["page"]) for s in sources if s.get("page")]
+            # 保存上下文：judge 判忠实度要有依据，否则只能给「无法验证」
+            result["context"] = "\n".join(str(s.get("content") or "") for s in sources)
+            cited: list[tuple[int, int]] = []
+            for source in sources:
+                start = source.get("page_start")
+                end = source.get("page_end")
+                if start is None or end is None:
+                    continue
+                span = (int(start), int(end))
+                if span not in cited:
+                    cited.append(span)
             expected = ds.expected_pages(item)
             result["keyword_coverage"] = metrics.keyword_coverage(answer, item["answer_keywords"])
             result["forbidden_hit"] = metrics.has_forbidden(
                 answer, item.get("must_not_include", [])
             )
             result["refusal"] = metrics.is_refusal(answer)
-            result["citation_precision"] = metrics.citation_precision(cited, expected)
+            result["citation_precision"] = metrics.spans_citation_precision(cited, expected)
+            result["cited_spans"] = [[span[0], span[1]] for span in cited]
         results.append(result)
     return results
 

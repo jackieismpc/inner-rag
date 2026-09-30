@@ -275,8 +275,10 @@ def _schema(kb_id: int, dimension: int) -> zvec.CollectionSchema:
     """知识库 collection 的 schema。
 
     ``doc_id`` 带倒排索引：按文档删除（``delete_by_filter``）与 doc 级过滤都走它。
-    ``page`` 是 nullable 的：只有 PDF 才有页码，缺省时读回结果里没有这个键，
-    与 Chroma 实现的「没有该字段」保持一致。
+    ``page`` / ``page_start`` / ``page_end`` 都是 nullable 的：只有 PDF 才有页码，
+    缺省时读回结果里没有这些键，与 Chroma 实现的「没有该字段」保持一致。
+    ``page_start`` / ``page_end`` 是闭区间（1-based 物理页）：当前切分不跨页，二者相等；
+    schema 必须提前声明，因为已建的 collection 改不了 schema——补字段要重建索引。
     """
     return zvec.CollectionSchema(
         name=f"kb_{kb_id}",
@@ -286,6 +288,8 @@ def _schema(kb_id: int, dimension: int) -> zvec.CollectionSchema:
             zvec.FieldSchema("filename", zvec.DataType.STRING),
             zvec.FieldSchema("chunk_index", zvec.DataType.STRING),
             zvec.FieldSchema("page", zvec.DataType.INT64, nullable=True),
+            zvec.FieldSchema("page_start", zvec.DataType.INT64, nullable=True),
+            zvec.FieldSchema("page_end", zvec.DataType.INT64, nullable=True),
             zvec.FieldSchema(CONTENT_FIELD, zvec.DataType.STRING),
         ],
         vectors=[

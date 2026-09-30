@@ -7,9 +7,14 @@
   名字里带 relevance、返回的却是没转换过的原始距离，直接用会出现「相关度 0% / 100%」这种错误展示；
 * **MMR 无分数**：``strategy="mmr"`` 的条目 ``score=None``，不参与阈值过滤，排序时排在有分数之后；
 * **阈值过滤计数**：被 ``score_threshold`` 滤掉的条数要返回，供「空召回率」这类指标使用；
-* **元数据是标量**：``doc_id`` / ``kb_id`` / ``chunk_index`` 存字符串、``page`` 存整数；
+* **元数据是标量**：``doc_id`` / ``kb_id`` / ``chunk_index`` 存字符串、``page`` 与页区间存整数；
   解析器额外附带的 ``source`` / ``sheet`` / ``ocr`` 不写进向量库——下游只消费
-  ``filename`` / ``page`` / ``doc_id`` / ``chunk_index``（见 ``services/rag.py`` 与 ``chunk_key``）。
+  ``filename`` / ``page`` / ``page_start`` / ``page_end`` / ``doc_id`` / ``chunk_index``
+  （见 ``services/rag.py`` 与 ``chunk_key``）；
+* **页码是区间**：除单页 ``page`` 外还写 ``page_start`` / ``page_end``（闭区间，1-based 物理页）。
+  当前解析器逐页产出 ``Document``、切分也不跨页（实测：龙族 PDF 平均 211 字符/页 < ``CHUNK_SIZE``），
+  所以区间**当前恒等**；保留区间是为了让引用核对与评测命中判定按区间写，
+  将来调整分块策略（合并相邻页）时只改 ``page_span`` 一处即可，不必再改契约。
 
 新增后端时：写入前调用 ``prepare_chunks``、返回前调用 ``finalize_results``、
 检索默认值走 ``resolve_search_defaults``，即可与现有后端保持同一份语义。
@@ -32,7 +37,15 @@ WRITE_BATCH_SIZE = 50
 
 # 写入向量库的分块元数据白名单。解析器还会附带 source / sheet / ocr 等字段，
 # 但下游（context 组装、混合检索去重）只消费这些；向量库 schema 也只声明这些字段。
-CHUNK_METADATA_FIELDS = ("doc_id", "kb_id", "filename", "chunk_index", "page")
+CHUNK_METADATA_FIELDS = (
+    "doc_id",
+    "kb_id",
+    "filename",
+    "chunk_index",
+    "page",
+    "page_start",
+    "page_end",
+)
 
 # MMR 的相关性 / 多样性权重，与 LangChain 默认一致
 MMR_LAMBDA = 0.5
@@ -86,6 +99,27 @@ def chunk_key(doc: Document) -> tuple[str | None, str | None]:
     return doc.metadata.get("doc_id"), doc.metadata.get("chunk_index")
 
 
+def page_span(doc: Document) -> tuple[int, int] | None:
+    """分块覆盖的页区间 ``(start, end)``：闭区间、1-based 物理页；没有页码信息返回 None。
+
+    区间优先取上游已经写好的 ``page_start`` / ``page_end``，缺失时退回单页 ``page``
+    （旧索引与「解析器逐页产出」的当前实现都走这一支）。
+    """
+    metadata = doc.metadata
+    start = metadata.get("page_start")
+    end = metadata.get("page_end")
+    if start is None or end is None:
+        page = metadata.get("page")
+        if page is None:
+            return None
+        try:
+            page_int = int(page)
+        except (TypeError, ValueError):
+            return None
+        return page_int, page_int
+    return int(start), int(end)
+
+
 def prepare_chunks(
     documents: list[Document], kb_id: int, doc_id: int, filename: str
 ) -> list[Document]:
@@ -102,15 +136,18 @@ def prepare_chunks(
     )
     chunks = [chunk for chunk in splitter.split_documents(documents) if chunk.page_content.strip()]
     for index, chunk in enumerate(chunks):
-        page = chunk.metadata.get("page")
         metadata: dict[str, str | int] = {
             "doc_id": str(doc_id),
             "kb_id": str(kb_id),
             "filename": filename,
             "chunk_index": str(index),
         }
-        if page is not None:
-            metadata["page"] = int(page)
+        span = page_span(chunk)
+        if span is not None:
+            # page 保留单点：旧索引与现有消费方（前端展示、chunk_key）都在用它
+            metadata["page"] = span[0]
+            metadata["page_start"] = span[0]
+            metadata["page_end"] = span[1]
         chunk.metadata = metadata
     return chunks
 

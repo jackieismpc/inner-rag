@@ -2,8 +2,9 @@
 
 判定口径：
 
-* **检索侧**以「页码」为单位：命中 = 召回分块的页码集合与期望锚点页集合有交集。
-* **回答侧**以关键词、拒答行为与引用页码为单位；LLM-as-judge 与忠实度在 Phase 4 追加。
+* **检索侧**以「页区间」为单位：命中 = 召回分块的页区间 ``(page_start, page_end)`` 与期望锚点页
+  有交集。当前切分不跨页，区间退化为单点，但判定逻辑按区间写（见 ``base.page_span``）；
+* **回答侧**以关键词、拒答行为与引用页码为单位；LLM-as-judge 正确性与忠实度在 Phase 6 追加。
 
 所有指标都是「越大越好」，取值 [0, 1]（毫秒类指标除外）。
 """
@@ -41,29 +42,61 @@ def percentile(values: Sequence[float], p: float) -> float:
     return ordered[low] * (1 - weight) + ordered[high] * weight
 
 
-def pages_hit(retrieved_pages: Sequence[int], expected_pages: Sequence[int]) -> bool:
-    """期望锚点页是否出现在召回页码里（Recall 的逐题判定）。"""
+def _span_covers(span: tuple[int, int], page: int) -> bool:
+    """闭区间 [start, end] 是否覆盖该页。"""
+    return span[0] <= page <= span[1]
+
+
+def spans_hit(retrieved_spans: Sequence[tuple[int, int]], expected_pages: Sequence[int]) -> bool:
+    """期望锚点页是否落在任一召回分块的页区间里（Recall 的逐题判定）。"""
     if not expected_pages:
         return False
-    return bool(set(retrieved_pages) & set(expected_pages))
+    wanted = set(expected_pages)
+    return any(_span_covers(span, page) for span in retrieved_spans for page in wanted)
 
 
-def reciprocal_rank(retrieved_pages: Sequence[int], expected_pages: Sequence[int]) -> float:
+def spans_reciprocal_rank(
+    retrieved_spans: Sequence[tuple[int, int]], expected_pages: Sequence[int]
+) -> float:
     """第一条命中结果的倒数排名；未命中为 0。"""
     wanted = set(expected_pages)
     if not wanted:
         return 0.0
-    for index, page in enumerate(retrieved_pages):
-        if page in wanted:
+    for index, span in enumerate(retrieved_spans):
+        if any(_span_covers(span, page) for page in wanted):
             return 1.0 / (index + 1)
     return 0.0
 
 
-def page_hit_rate(retrieved_pages: Sequence[int], expected_pages: Sequence[int]) -> float:
+def spans_page_hit_rate(
+    retrieved_spans: Sequence[tuple[int, int]], expected_pages: Sequence[int]
+) -> float:
     """命中的期望页数 / 期望页总数（多锚点题反映证据是否被拆散）。"""
     if not expected_pages:
         return 0.0
-    return len(set(retrieved_pages) & set(expected_pages)) / len(set(expected_pages))
+    wanted = set(expected_pages)
+    covered = {page for span in retrieved_spans for page in wanted if _span_covers(span, page)}
+    return len(covered) / len(wanted)
+
+
+def spans_from_pages(pages: Sequence[int]) -> list[tuple[int, int]]:
+    """只有单点页号（旧结果 / 旧索引）时的兼容转换：每个页号退化成单点区间。"""
+    return [(int(page), int(page)) for page in pages]
+
+
+def pages_hit(retrieved_pages: Sequence[int], expected_pages: Sequence[int]) -> bool:
+    """期望锚点页是否出现在召回页码里（单点口径，等价于区间退化的 ``spans_hit``）。"""
+    return spans_hit(spans_from_pages(retrieved_pages), expected_pages)
+
+
+def reciprocal_rank(retrieved_pages: Sequence[int], expected_pages: Sequence[int]) -> float:
+    """单点口径的 MRR。"""
+    return spans_reciprocal_rank(spans_from_pages(retrieved_pages), expected_pages)
+
+
+def page_hit_rate(retrieved_pages: Sequence[int], expected_pages: Sequence[int]) -> float:
+    """单点口径的页命中率。"""
+    return spans_page_hit_rate(spans_from_pages(retrieved_pages), expected_pages)
 
 
 def keyword_coverage(answer: str, keywords: Sequence[str]) -> float:
@@ -83,14 +116,27 @@ def is_refusal(answer: str) -> bool:
     return any(marker in answer for marker in REFUSAL_MARKERS)
 
 
+def spans_citation_precision(
+    cited_spans: Sequence[tuple[int, int]], expected_pages: Sequence[int]
+) -> float:
+    """引用精度：命中期望页的引用区间数 / 引用的区间总数；没有引用则为 0。
+
+    分母用「引用条数」而不是「引用页数」：多引无关页会立刻拉低精度，
+    与「少引但准」区分开（引用展示走 sources，见 docs/evaluation.md 4.2）。
+    """
+    spans = list(dict.fromkeys(cited_spans))  # 同一区间被多次引用只算一次
+    if not spans:
+        return 0.0
+    wanted = set(expected_pages)
+    if not wanted:
+        return 0.0
+    hits = sum(1 for span in spans if any(_span_covers(span, page) for page in wanted))
+    return hits / len(spans)
+
+
 def citation_precision(cited_pages: Sequence[int], expected_pages: Sequence[int]) -> float:
-    """引用精度：引用到的期望页 / 引用的全部页；没有引用则为 0。"""
-    if not cited_pages:
-        return 0.0
-    if not expected_pages:
-        return 0.0
-    hits = len(set(cited_pages) & set(expected_pages))
-    return hits / len(set(cited_pages))
+    """单点口径的引用精度。"""
+    return spans_citation_precision(spans_from_pages(cited_pages), expected_pages)
 
 
 def _mean(values: Sequence[float]) -> float:
@@ -111,6 +157,15 @@ def summarize(results: Sequence[dict]) -> dict:
     ]
     forbidden = [r["forbidden_hit"] for r in results if r.get("forbidden_hit") is not None]
     refusals = [r["refusal"] for r in negatives if r.get("refusal") is not None]
+    # 误拒率：该答却拒答（正样本被判为拒答的比例），与拒答正确率一起看才有意义
+    false_refusals = [r["refusal"] for r in positives if r.get("refusal") is not None]
+    judges = [r["judge_correct"] for r in positives if r.get("judge_correct") is not None]
+    faithful = [r["faithfulness"] for r in positives if r.get("faithfulness") is not None]
+    prompt_tokens = [r["prompt_tokens"] for r in results if r.get("prompt_tokens") is not None]
+    completion_tokens = [
+        r["completion_tokens"] for r in results if r.get("completion_tokens") is not None
+    ]
+    costs = [r["cost_usd"] for r in results if r.get("cost_usd") is not None]
 
     return {
         "items": len(results),
@@ -126,6 +181,14 @@ def summarize(results: Sequence[dict]) -> dict:
         "forbidden_rate": _mean([1.0 if f else 0.0 for f in forbidden]) if forbidden else None,
         "citation_precision": _mean(citations) if citations else None,
         "refusal_accuracy": _mean([1.0 if r else 0.0 for r in refusals]) if refusals else None,
+        "false_refusal_rate": _mean([1.0 if r else 0.0 for r in false_refusals])
+        if false_refusals
+        else None,
+        "judge_accuracy": _mean([1.0 if j else 0.0 for j in judges]) if judges else None,
+        "faithfulness": _mean(faithful) if faithful else None,
+        "prompt_tokens": sum(prompt_tokens) if prompt_tokens else None,
+        "completion_tokens": sum(completion_tokens) if completion_tokens else None,
+        "cost_usd": round(sum(costs), 6) if costs else None,
         "retrieval_p50_ms": percentile(retrieval_ms, 0.5),
         "retrieval_p95_ms": percentile(retrieval_ms, 0.95),
         "total_p50_ms": percentile(total_ms, 0.5) if total_ms else None,

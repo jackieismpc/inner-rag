@@ -34,6 +34,21 @@ from inner_rag.providers.specs import chat_spec
 from inner_rag.services.cache import query_cache
 from inner_rag.services.retrieval_log import log_prompt, log_retrieval
 from inner_rag.services.vector_store import Strategy, vector_service
+from inner_rag.services.vector_store.base import page_span
+
+
+def format_page_span(span: tuple[int, int] | None) -> str:
+    """页码区间的展示文案：单点显示「·第N页」，跨页显示「·第N-M页」，无页码则空串。
+
+    引用要能「照着翻到那一页」，所以展示与判定都以区间为准（见 docs/evaluation.md 4.3）。
+    """
+    if not span:
+        return ""
+    start, end = span
+    if start == end:
+        return f"·第{start}页"
+    return f"·第{start}-{end}页"
+
 
 SYSTEM_PROMPT = """你是企业内部知识库助手，请根据以下参考文档回答用户问题。
 
@@ -174,8 +189,9 @@ class RAGService:
 
         for index, (doc, score) in enumerate(results[: settings.RERANK_TOP_K]):
             filename = doc.metadata.get("filename", "未知文件")
+            span = page_span(doc)
             page = doc.metadata.get("page", "")
-            page_info = f"·第{page}页" if page else ""
+            page_info = format_page_span(span)
             content = doc.page_content
 
             if total_len + len(content) > settings.MAX_CONTEXT_LENGTH:
@@ -193,6 +209,8 @@ class RAGService:
                     "index": index + 1,
                     "filename": filename,
                     "page": page,
+                    "page_start": span[0] if span else None,
+                    "page_end": span[1] if span else None,
                     "score": round(float(score), 4) if score is not None else None,
                     "doc_id": doc.metadata.get("doc_id"),
                     "content": (
