@@ -41,7 +41,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from benchmark import dataset as ds  # noqa: E402 - 需要先补 sys.path
-from benchmark import metrics  # noqa: E402
+from benchmark import langsmith_sync, metrics  # noqa: E402
 
 DEFAULT_REPORT_DIR = REPO_ROOT / "docs" / "reports"
 
@@ -460,6 +460,11 @@ def main(argv: list[str] | None = None) -> int:
     for result in results:
         result.setdefault("failure", attribute_failure(result))
 
+    # 把分数回写到对应 trace（追踪未启用时是 no-op，不影响报告产出）
+    feedback_written = langsmith_sync.push_feedback(langsmith_sync.client_or_none(), results)
+    if feedback_written:
+        print(f"[eval] 已回写 {feedback_written} 条 feedback 到 LangSmith")
+
     from inner_rag.core.config import settings
     from inner_rag.providers.specs import chat_spec
 
@@ -489,6 +494,7 @@ def main(argv: list[str] | None = None) -> int:
             "price_prompt": args.price_prompt,
             "price_completion": args.price_completion,
             "source": str(args.from_result) if args.from_result else f"kb:{args.kb_id}",
+            "langsmith_feedback": feedback_written,
         },
         "summary": metrics.summarize(results),
         "items": results,

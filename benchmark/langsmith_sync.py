@@ -33,6 +33,22 @@ def client_or_none() -> LangSmithClient | None:
     return tracer.client
 
 
+def project_id(client: LangSmithClient | None) -> str | None:
+    """当前 project 的 id。
+
+    ``create_feedback`` 不带 ``session_id`` 会走已废弃的路径（官方说明将来会失效），
+    而 ``client.runs.retrieve`` 更是强制要求 ``project_id``。两者都需要它，所以单独取一次。
+    """
+    if client is None:
+        return None
+    try:
+        from inner_rag.core.config import settings
+
+        return str(client.read_project(project_name=settings.LANGSMITH_PROJECT).id)
+    except Exception:
+        return None
+
+
 def sync_dataset(
     client: LangSmithClient | None, items: list[dict[str, Any]], dataset_name: str
 ) -> str | None:
@@ -75,6 +91,7 @@ def push_feedback(client: LangSmithClient | None, results: list[dict[str, Any]])
     """
     if client is None:
         return 0
+    session_id = project_id(client)
     written = 0
     for result in results:
         trace_id = result.get("trace_id")
@@ -93,6 +110,7 @@ def push_feedback(client: LangSmithClient | None, results: list[dict[str, Any]])
                     trace_id=trace_id,
                     key=key,
                     score=float(value),
+                    session_id=session_id,
                     comment=f"{result.get('id')}: {result.get('judge_reason') or ''}"[:200],
                 )
                 written += 1

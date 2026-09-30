@@ -101,6 +101,7 @@ def _item_result(
         "citation_precision": None,
         "total_ms": None,
         "context": "",
+        "trace_id": None,
         "judge_correct": None,
         "judge_reason": None,
         "faithfulness": None,
@@ -195,12 +196,18 @@ async def run_kb(args: argparse.Namespace, items: list[dict]) -> list[dict]:
         result = _item_result(item, _spans_of(hits), filtered_out, elapsed)
 
         if args.answer:
+            from inner_rag.core.observability import tracer
             from inner_rag.services.rag import rag_service
 
             began = time.perf_counter()
-            answer, sources = await rag_service.chat(
-                args.kb_id, item["question"], strategy=args.strategy
-            )
+            # 套一层 eval.item 当 trace 根：rag.request 及其子 span 都挂在它下面。
+            # 这样拿到的 trace_id 就是整棵树的根 id，评测分数才能回写到「这一次调用」，
+            # 而不是堆在实验维度上无处下钻（见 docs/evaluation.md 6.3）。
+            async with tracer.span("eval.item", eval_id=item["id"], kb_id=args.kb_id):
+                answer, sources = await rag_service.chat(
+                    args.kb_id, item["question"], strategy=args.strategy
+                )
+                result["trace_id"] = tracer.current_trace_id()
             result["total_ms"] = (time.perf_counter() - began) * 1000
             result["answer"] = answer
             # 保存上下文：judge 判忠实度要有依据，否则只能给「无法验证」
@@ -295,6 +302,14 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
+
+    # 脚本不是 FastAPI 入口，没有 lifespan 替我们初始化追踪；
+    # 不 configure 的话 span 只落本地计时，trace_id 全为空，分数也就无处回写。
+    from inner_rag.core.observability import tracer
+
+    tracer.configure()
+    if args.answer:
+        print(f"追踪：{tracer.status()['backend']}（{tracer.status()['reason']}）")
 
     workdir_ctx = None
     if args.mode == "fixtures":
