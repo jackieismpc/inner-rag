@@ -1,10 +1,25 @@
-"""缓存层测试。"""
+"""缓存插件点测试：LRU 引擎 + ``CacheBackend`` 契约 + 两个业务缓存。
+
+契约用例用 ``backend`` fixture 参数化：新增一个后端（例如 Redis）只需在 ``BACKEND_FACTORIES``
+里加一行，同一组用例就会跑到它身上（见 `docs/architecture.md` 3.4）。
+"""
 
 from __future__ import annotations
 
 import time
 
-from inner_rag.services.cache import LRUCache, embedding_cache, query_cache
+import pytest
+
+from inner_rag.services.cache import (
+    CacheBackend,
+    LRUCache,
+    MemoryCacheBackend,
+    build_cache_backend,
+    embedding_cache,
+    query_cache,
+)
+
+# ── LRU 引擎（内存后端的实现细节）─────────────────────────────────────
 
 
 def test_lru_eviction() -> None:
@@ -27,15 +42,16 @@ def test_lru_ttl_expiry() -> None:
     assert cache.get("k") is None
 
 
-def test_clear_prefix() -> None:
+def test_clear_matching_is_glob_scoped() -> None:
+    """`1:*` 不能连带删掉 kb=11：通配必须按模式匹配，而不是前缀字符串比较。"""
     cache = LRUCache(max_size=8)
-    cache.set("q:1:x", 1)
-    cache.set("q:2:y", 2)
-    cache.set("e:1:z", 3)
+    cache.set("1:abc", 1)
+    cache.set("2:def", 2)
+    cache.set("11:ghi", 3)
 
-    assert cache.clear_prefix("q:1:") == 1
-    assert cache.get("q:2:y") == 2
-    assert cache.get("e:1:z") == 3
+    assert cache.clear_matching("1:*") == 1
+    assert cache.get("11:ghi") == 3
+    assert cache.get("2:def") == 2
 
 
 def test_stats_hit_rate() -> None:
@@ -49,6 +65,65 @@ def test_stats_hit_rate() -> None:
     assert stats["hits"] == 1
     assert stats["misses"] == 1
     assert stats["hit_rate"] == 0.5
+
+
+# ── CacheBackend 契约 ─────────────────────────────────────────────────
+
+BACKEND_FACTORIES = {
+    "memory": lambda: build_cache_backend("memory"),
+    "memory-no-limits": MemoryCacheBackend,
+}
+
+
+@pytest.fixture(params=sorted(BACKEND_FACTORIES), ids=sorted(BACKEND_FACTORIES))
+def backend(request: pytest.FixtureRequest) -> CacheBackend:
+    return BACKEND_FACTORIES[request.param]()
+
+
+def test_backend_namespaces_are_isolated(backend: CacheBackend) -> None:
+    backend.set("query", "k", "检索结果")
+    backend.set("embedding", "k", "向量")
+
+    assert backend.get("query", "k") == "检索结果"
+    assert backend.get("embedding", "k") == "向量"
+
+    # 清一个 namespace 不能影响另一个
+    assert backend.invalidate("query") == 1
+    assert backend.get("query", "k") is None
+    assert backend.get("embedding", "k") == "向量"
+
+
+def test_backend_invalidate_by_pattern_and_missing_key(backend: CacheBackend) -> None:
+    backend.set("query", "1:a", 1)
+    backend.set("query", "2:b", 2)
+
+    assert backend.invalidate("query", "1:*") == 1
+    assert backend.get("query", "2:b") == 2
+    assert backend.invalidate("query", "1:*") == 0  # 幂等：没有可删的就返回 0
+    assert backend.get("query", "never-set") is None
+
+
+def test_backend_stats_are_per_namespace(backend: CacheBackend) -> None:
+    backend.set("query", "k", "v")
+    backend.get("query", "k")
+    backend.get("query", "miss")
+
+    query_stats = backend.stats("query")
+    assert query_stats["size"] == 1
+    assert query_stats["hits"] == 1
+    assert query_stats["misses"] == 1
+
+
+def test_build_cache_backend_rejects_unknown_name() -> None:
+    with pytest.raises(ValueError) as excinfo:
+        build_cache_backend("redis")
+
+    message = str(excinfo.value)
+    assert "CACHE_BACKEND" in message
+    assert "memory" in message  # 可选值来自注册表
+
+
+# ── 业务缓存 ──────────────────────────────────────────────────────────
 
 
 async def test_query_cache_is_per_kb() -> None:
@@ -70,13 +145,18 @@ async def test_query_cache_normalizes_query() -> None:
     assert await query_cache.get(3, "hello", 2) == "value"
 
 
-def test_query_cache_sync_invalidation() -> None:
-    query_cache._cache.set("q:7:abc", "v")
+async def test_query_cache_sync_invalidation() -> None:
+    await query_cache.set(7, "问题", 5, "v")
     assert query_cache.invalidate_kb_sync(7) == 1
-    assert query_cache._cache.get("q:7:abc") is None
+    assert await query_cache.get(7, "问题", 5) is None
 
 
-async def test_embedding_cache_keys_include_model_identity() -> None:
-    await embedding_cache.set("文本", [1.0, 2.0])
-    assert await embedding_cache.get("文本") == [1.0, 2.0]
-    assert embedding_cache.stats()["size"] >= 1
+async def test_embedding_cache_round_trip_and_batch() -> None:
+    """同步接口（LangChain 内部路径）与批量接口都要能命中同一份缓存。"""
+    embedding_cache.set_sync("同步文本", [1.0, 2.0])
+    assert embedding_cache.get_sync("同步文本") == [1.0, 2.0]
+
+    await embedding_cache.set_batch(["a", "b"], [[1.0], [2.0]])
+    vectors, miss_indices = await embedding_cache.get_batch(["a", "b", "c"])
+    assert vectors[:2] == [[1.0], [2.0]]
+    assert miss_indices == [2]

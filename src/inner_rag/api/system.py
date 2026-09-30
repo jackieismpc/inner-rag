@@ -112,7 +112,7 @@ async def clear_cache(
     if kb_id is not None:
         cleared = await query_cache.invalidate_kb(kb_id)
     else:
-        cleared = await query_cache.invalidate_all()
+        cleared = query_cache.clear()
     return {"message": "缓存已清除", "cleared_keys": cleared}
 
 

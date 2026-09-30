@@ -129,6 +129,8 @@ class Settings(BaseSettings):
     HISTORY_MAX_MESSAGES: int = 20  # 送入模型的历史消息条数（最近 N 条）
 
     # ── Cache ──────────────────────────────────────────────────────────
+    # 后端选择：memory（默认，进程内 LRU）| 第三方实现（注册 entry point 后填它的名字）
+    CACHE_BACKEND: str = "memory"
     QUERY_CACHE_TTL: int = 300
     QUERY_CACHE_MAX_SIZE: int = 500
     EMBEDDING_CACHE_MAX_SIZE: int = 2000

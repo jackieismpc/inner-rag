@@ -159,24 +159,24 @@ def offline_providers(request: pytest.FixtureRequest) -> Iterator[None]:
     否则它们会拿假模型去验证真 API。
     """
     if request.node.get_closest_marker("live") is not None:
-        query_cache._cache.clear()
-        embedding_cache._cache.clear()
+        query_cache.clear()
+        embedding_cache.clear()
         yield
-        query_cache._cache.clear()
-        embedding_cache._cache.clear()
+        query_cache.clear()
+        embedding_cache.clear()
         return
 
     original_embeddings = embedding_service._embeddings
     original_get_llm = rag_service._get_llm
     embedding_service._embeddings = FakeEmbeddings()
     rag_service._get_llm = fake_llm  # type: ignore[method-assign]
-    query_cache._cache.clear()
-    embedding_cache._cache.clear()
+    query_cache.clear()
+    embedding_cache.clear()
     yield
     embedding_service._embeddings = original_embeddings
     rag_service._get_llm = original_get_llm  # type: ignore[method-assign]
-    query_cache._cache.clear()
-    embedding_cache._cache.clear()
+    query_cache.clear()
+    embedding_cache.clear()
 
 
 @pytest.fixture(scope="session", autouse=True)
