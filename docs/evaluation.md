@@ -1,7 +1,8 @@
 # 评测体系：怎么量化「答得准不准」
 
 对应 `docs/DEVELOPMENT_PLAN.md` 的 **Phase 6**（基线）与 **Phase 8**（提升）。
-评测语料是真实中文长篇小说 `data/uploads/龙族.pdf`（11,165 页 / 2,362,491 字符），
+评测语料是真实中文长篇小说 `data/uploads/龙族.pdf`。**实测口径**（pypdf 提取，2026-09-30）：
+11,138 个非空页、2,351,990 字符，**平均每页约 211 字符**——这个数字决定了后面几乎所有设计。
 评测集与离线短片段放在 `docs/datasets/dragon_king/`。
 
 ## 1. 为什么要评测
@@ -20,15 +21,25 @@ RAG 的失败只有两种，而且必须分开看：
 
 | 库 | 规模 | 用途 | 能否入库仓库 |
 | --- | --- | --- | --- |
-| **小库**（`dragon_king_small`） | 目标 ≤ 1,200 页 / ≤ 250 分块 | 自动化评测 + CI 回归 + 日常调参 | 否（PDF 本地，构建脚本生成） |
-| **全库**（`dragon_king_full`） | 全量 11,165 页 / 约 2,900–3,000 分块 | 里程碑人工验收、规模性能验证 | 否 |
+| **小库**（`dragon_king_small`） | 实测 227 页 / 227 分块 | 自动化评测 + CI 回归 + 日常调参 | 否（PDF 本地，构建脚本生成） |
+| **全库**（`dragon_king_full`） | 全量 11,138 页 / 约 11,138 分块 | 里程碑人工验收、规模性能验证 | 否 |
 | **离线 fixture** | 9 段、每段 <200 字 | 无 PDF / 无网络时跑通评测逻辑（CI） | **是**，随仓库提交 |
 
-小库的页窗口由 `scripts/build_eval_kb.py --profile small` 生成，必须包含：
+小库的页窗口由 `scripts/build_eval_kb.py --profile small` 生成（常量写在脚本里：`ANCHOR_WINDOWS`
+与 `IRRELEVANT_WINDOWS`），必须包含：
 
-- 命中全部评测条目的锚点页（含前后各 ±2 页的上下文，避免分块边界切掉证据）；
-- 一组与评测问题**无关**的章节（约 10–15% 篇幅），用于验证「阈值能挡住不相关内容」；
-- 覆盖多个人物线（路明非 / 绘梨衣 / 恺撒 / 楚子航 / 诺诺），避免小库退化成单主题语料。
+- 命中全部评测条目的锚点页（含前后各 ±2 页的上下文）→ 8 段共 67 页；
+- 一组与评测问题**无关**的连续章节 → 3 段共 160 页；
+- 覆盖多个人物线（路明非 / 绘梨衣 / 恺撒 / 楚子航 / 诺诺）。
+
+**无关章节占比为什么远高于原定 10–15%**：锚点窗口只有 67 页，按 15% 配噪声则全库不到 80 页，
+检索几乎没有干扰，Recall 会虚高到不可用（真实场景是 67 / 11,138 ≈ 0.6%）。所以这里让噪声占
+约 70%，换取「指标还能反映检索好坏」。这条偏离原计划，是实测后的主动调整。
+
+**页码必须是源 PDF 的物理页号**：早期实现先把窗口页抽成子 PDF 再走上传链路，结果库里存的是
+子 PDF 的局部页号（1..227）——引用「第 166 页」在源书里翻不到，评测锚点（5904 这类源页号）
+也全部对不上，Recall 直接归零，而回答其实是对的。现在的做法是解析源 PDF 后**只筛选、不重编号**
+（`build_eval_kb.select_pages`），页码与源文档始终一致。
 
 ### 2.2 为什么不全用全库
 
@@ -157,9 +168,12 @@ uv run scripts/build_eval_kb.py --profile full --name dragon_king_full
   反向也要看**误拒率**（该答却拒答），两者一起报。
 - **延迟与成本**：单题检索耗时、生成耗时、prompt/completion token、估算费用。
 
-### 4.3 与代码的接口约定
+### 4.3 与代码的接口约定（Phase 6 已落地）
 
-- 分块元数据必须含 `page_start` / `page_end`（Phase 6 增补，见 `docs/DEVELOPMENT_PLAN.md` 第 4 节）；
+- 分块元数据含 `page_start` / `page_end`（`base.CHUNK_METADATA_FIELDS`，闭区间、1-based 物理页）；
+  当前切分不跨页，二者相等，SSE `sources` 一并返回；
+- 命中判定统一走区间口径：`metrics.spans_hit` / `spans_reciprocal_rank` / `spans_page_hit_rate` /
+  `spans_citation_precision`（单点版本的 `pages_hit` 等保留，语义与区间版本一致）；
 - 检索结果沿用现有契约：`(Document, relevance|None)` + 被阈值滤掉的条数；
 - 回答与来源沿用现有 SSE/JSON 结构（`sources` 含 `index/filename/page/score/doc_id/content`），
   评测脚本只读这些结构，**不额外给后端加评测专用分支**。
@@ -167,11 +181,16 @@ uv run scripts/build_eval_kb.py --profile full --name dragon_king_full
 ### 4.4 已知陷阱
 
 - **512 token 截断**：免费 embedding 上下文只有 512 token 且当前 `EMBEDDING_MAX_INPUT_CHARS=400`，
-  `CHUNK_SIZE=1000` 会被截断——这是**已知的系统性损耗**，报告必须写明该配置，结论不可与其他配置混比。
+  超过 400 字符的页会被截断（实测约三分之一的页受影响）——这是**已知的系统性损耗**，报告必须写明
+  该配置，结论不可与其他配置混比。
 - **MMR 无分数**：`strategy="mmr"` 返回 `score=None` 且不过阈值，评测时「Recall@k」可比，
   但「top_score」类指标不可比。
-- **分块跨页**：1000 字符约 5 页，单页元数据粒度不足 → 必须用 `page_start/page_end` 判命中，
-  否则会把「命中邻页」误判为失败。
+- **分块粒度（实测纠正）**：原以为「1000 字符约 5 页」，实际是**每页约 211 字符、一个分块就是
+  一整页**（`RecursiveCharacterTextSplitter.split_documents` 不跨文档合并）。因此全库是约 11,138
+  分块而不是 2,900–3,000；`page_start/page_end` 当前恒等。块这么碎意味着跨页的对话/描写会被切断，
+  这是基线里「检索失败」类错题的结构性原因，属于 Phase 8 的改进项。
+- **分块跨页（未来）**：一旦调整分块策略让块跨页，单页 `page` 就不足以核对引用 —— 命中判定已经
+  按区间写（`metrics.spans_hit`），改分块时只需改 `base.page_span` 一处。
 - **阈值过滤**：`RETRIEVAL_SCORE_THRESHOLD=0.3` 是经验值；评测报告要同时给出「过滤前」与「过滤后」
   的 Recall，才能区分「没找到」与「被阈值挡了」。
 - **judge 漂移**：judge 模型或 prompt 变了要重跑基线；报告记录 judge identity。
@@ -182,8 +201,8 @@ uv run scripts/build_eval_kb.py --profile full --name dragon_king_full
 | 级别 | 数据 | 网络 | 场景 | 命令 | 频率 |
 | --- | --- | --- | --- | --- | --- |
 | L1 离线 fixture | 仓库内短片段 | 不需要 | 评测逻辑正确性、CI 门禁 | `uv run python -m benchmark.run_bench --mode fixtures`（+ `pytest -q tests/test_benchmark_metrics.py`） | 每次提交 |
-| L2 live 小库 | 本地 PDF 小库 | 需要 provider Key | 真实指标、回归对比、G3 门禁 | `uv run python -m benchmark.run_bench --mode kb --kb-id <小库> --answer --update-readme` | 每次阶段收尾 / 改动检索与 Prompt 时 |
-| L3 全库人工 | 本地 PDF 全库 | 需要 | 里程碑验收、规模与成本 | 同上，`--kb-id <全库>`；Phase 6 起再用 `scripts/eval_answer.py` 出完整报告 | 里程碑 |
+| L2 live 小库 | 本地 PDF 小库 | 需要 provider Key | 真实指标、回归对比、G3 门禁 | `uv run scripts/build_eval_kb.py --profile small` → `uv run python -m benchmark.run_bench --mode kb --kb-id <小库> --answer --update-readme` → `uv run scripts/eval_answer.py --from-result <结果 json>` | 每次阶段收尾 / 改动检索与 Prompt 时 |
+| L3 全库人工 | 本地 PDF 全库 | 需要 | 里程碑验收、规模与成本 | 同上，`--profile full`（约 11,138 分块，耗时与费用显著，只在里程碑跑） | 里程碑 |
 
 L3 不只看自动指标：抽 10 题人工核对引用页码是否真的能翻到该内容。
 
@@ -205,7 +224,7 @@ L3 不只看自动指标：抽 10 题人工核对引用页码是否真的能翻�
 
 | 基线 | 日期 | 配置 | Recall@8 | 引用命中率 | 要点命中率 | 拒答正确率 | 报告 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| baseline-0 | 待 Phase 6 产出 | 默认配置 + 小库 | — | — | — | — | — |
+| baseline-0 | 2026-09-30 | 小库 227 页 / hybrid / k=8 / th=0.3 / lfm-2.5-350m + deepseek-flash | 75.0% | 27.5% | 75.0% | 100.0% | [`eval-2026-09-30-small-hybrid-k-8-th-0.3.md`](reports/eval-2026-09-30-small-hybrid-k-8-th-0.3.md) |
 
 （Phase 6 完成后填第一行；Phase 8 的每次提升追加新行，永不删旧行——历史数字是判断趋势的唯一依据。）
 
@@ -227,15 +246,23 @@ L3 不只看自动指标：抽 10 题人工核对引用页码是否真的能翻�
 | 评测集与 fixture 的 schema / 锚点校验 | `benchmark/dataset.py` |
 | 报告（配置快照 + 逐题明细） | `benchmark/results/<日期>-kb-<配置>.json`（fixtures 自检不落盘） |
 | README 基准表 | `benchmark/report.py`，写入 `<!-- BEGIN BENCHMARK -->` 区间 |
+| **建库**（页窗口 + 入库 + manifest） | `scripts/build_eval_kb.py` → `docs/reports/eval-kb-<日期>-<profile>.json` |
+| **回答评测**（judge / 忠实度 / token / 报告） | `scripts/eval_answer.py` → `docs/reports/eval-<日期>-<label>.md` + `.json` |
+| **LangSmith 回写**（可选） | `benchmark/langsmith_sync.py`：dataset 同步 + 逐条 feedback |
 
-三者是同一份数据的不同展示：
+四者产出的是同一份数据的不同展示：
 
 1. 每次跑 `--mode kb … --update-readme` 在 README 基准表新增/覆盖一行（对外，一眼看趋势）；
 2. 同一行的完整版本（逐题明细 + 配置快照）落在 `benchmark/results/*.json`（回溯用）；
-3. 里程碑节点把关键数字摘进第 6.2 节的基线表（长期档案，永不删旧行）。
+3. `scripts/eval_answer.py` 在其之上补 judge / 忠实度 / token，产出 `docs/reports/*.md`（人读的报告
+   与失败归因）与同名 `.json`（给下一次报告做差值对比）；
+4. 里程碑节点把关键数字摘进第 6.2 节的基线表（长期档案，永不删旧行）。
 
-留给 Phase 6 的部分：LLM-as-judge 正确性与忠实度、token/成本字段、`docs/reports/*.md` 报告、LangSmith
-experiment 回写。`benchmark` 的 fixtures 模式**不允许**写 README、也不落盘结果——自检分数不是成绩。
+**成本口径**：judge 与问答的 token 都会记录（`prompt_tokens` / `completion_tokens`），但**估算费用
+默认 0**——单价属计费域，脚本不内置价格表；要算钱请用 `--price-prompt/--price-completion`
+（USD / 1M tokens），否则报告里会显式标注「未配置价格表」。
+
+`benchmark` 的 fixtures 模式**不允许**写 README、也不落盘结果——自检分数不是成绩。
 
 ## 7. 门禁（G3）
 
@@ -255,3 +282,7 @@ experiment 回写。`benchmark` 的 fixtures 模式**不允许**写 README、也
 - **fixture 回归**：`--mode fixtures` 在短片段上跑通并输出稳定结果（不联网、不写 README）；
 - **锚点回归**：本地有 PDF 时逐条校验引用片段与 fixture 都能在源文档命中（无 PDF 自动 skip）；
 - **不打网络**：默认评测里所有模型调用必须走 mock；真实调用只在 L2/L3。
+
+Phase 6 新增用例见 `tests/test_eval_pipeline.py`（23 例，离线）：区间命中判定、单点与区间口径一致、
+`page_start/page_end` 写入、页窗口覆盖全部锚点、manifest 字段完整、judge 输出解析（围栏 / 全角 /
+非 JSON）、失败归因、judge 与成本维度汇总、LangSmith 关闭时是 no-op 且错误被吞掉、页码保持源页号。

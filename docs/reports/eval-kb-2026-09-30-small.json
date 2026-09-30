@@ -1,0 +1,65 @@
+{
+  "kb_id": 1,
+  "name": "dragon_king_small",
+  "profile": "small",
+  "source": "data/uploads/龙族.pdf",
+  "source_sha256": "18eecb012c032cb0cf4829ebe108de039da01f14331d4085bddd13e215daf716",
+  "page_windows": [
+    [
+      116,
+      126
+    ],
+    [
+      329,
+      335
+    ],
+    [
+      381,
+      387
+    ],
+    [
+      5276,
+      5282
+    ],
+    [
+      5902,
+      5908
+    ],
+    [
+      6070,
+      6083
+    ],
+    [
+      6353,
+      6359
+    ],
+    [
+      6411,
+      6417
+    ],
+    [
+      900,
+      959
+    ],
+    [
+      3000,
+      3049
+    ],
+    [
+      8000,
+      8049
+    ]
+  ],
+  "pages": 227,
+  "chunks": 227,
+  "chunk_size": 1000,
+  "chunk_overlap": 200,
+  "embedding_identity": "openrouter:liquid/lfm-2.5-embedding-350m:free",
+  "embedding_max_input_chars": 400,
+  "app_version": "0.3.0",
+  "git_commit": "4d4e290",
+  "built_at": "2026-09-30T03:37:58+00:00",
+  "duration_s": 312.8,
+  "est_cost_usd": 0.0,
+  "warnings": []
+}

@@ -24,6 +24,46 @@
 
 ---
 
+## [Phase 6] 2026-09-30 — 评测体系与准确性基线（龙族真实语料）
+
+- 类型：新增功能
+- 目的：Phase 0–5 解决了「能跑、能换后端、能控权限、能排障」，但「答得准不准」始终是一句主观判断。
+  改检索、改分块、改 Prompt 之后没有任何数字能回答「到底变好了没有」，调参就只能靠感觉。
+  本阶段把这件事变成可复现的数字：同一套语料、同一套题、同一份配置快照，两次改动直接对比。
+- 方案：
+  - **建库脚本化**（`scripts/build_eval_kb.py`）：从 `data/uploads/龙族.pdf` 按页窗口建小库/全库，
+    产出 `docs/reports/eval-kb-<日期>-<profile>.json` 记录页窗口、分块数、embedding identity、
+    PDF sha256 与耗时——评测结论要可复现，就必须知道「这个库到底是哪几页」。
+  - **回答评测**（`scripts/eval_answer.py`）：LLM-as-judge 正确性 + 忠实度 + token + 失败归因 +
+    与上次报告的差值对比 → `docs/reports/eval-<日期>-<label>.md`。judge 模型与 prompt 版本写进报告
+    （换任一都要重跑基线）。
+  - **引用可核对**：分块元数据补 `page_start` / `page_end`（进 zvec schema 与 SSE `sources`），
+    命中判定从「单页号」改为「页区间」（`metrics.spans_*`，单点口径保留且与区间口径一致）。
+  - **LangSmith 联动**（`benchmark/langsmith_sync.py`）做成可选 sink：关闭时是 no-op，
+    评测不许依赖跟踪后端。
+  - 两个关键取舍：① **页码必须是源 PDF 物理页号**——早期把窗口页抽成子 PDF 再入库，库里存成了
+    局部页号（1..227），引用翻不到原文、评测锚点（5904）全对不上，Recall 直接归零而回答其实是对的；
+    现在改成解析源 PDF 后「只筛选、不重编号」。② **成本不内置价格表**：单价属计费域，
+    默认 0 并在报告标注「未配置价格表」，要算钱用 `--price-prompt/--price-completion`。
+- 效果：
+  - 小库 `dragon_king_small`（kb_id=1）：227 页 / 227 分块，构建 312.8s，manifest 已落盘；
+    无关章节自检 0 命中（噪声段确实不含评测证据原文）。
+  - 基线（9 题：8 正样本 + 1 负样本，hybrid / k=8 / th=0.3，lfm-2.5-350m + deepseek-flash）：
+    Recall@8 **75.0%**、MRR 0.688、页命中率 62.5%、要点命中率 75.0%、引用精度 **27.5%**、
+    judge 正确率 75.0%、忠实度 87.5%、拒答正确率 **100.0%**、误拒率 12.5%，检索 p50 1,641ms。
+    报告：`docs/reports/eval-2026-09-30-small-hybrid-k-8-th-0.3.md`。
+  - 失败归因给出了 Phase 8 的两个不同方向：`nonno-real-name` 是阈值过严（8 条召回全被 th=0.3 挡掉），
+    `erie-lingyan` 是检索失败（召回页与证据页无关，改阈值救不了）。
+  - 离线用例 149 → **172**（新增 `tests/test_eval_pipeline.py` 23 例）；`ruff check` / `mypy` 48 文件
+    全绿；`uv run python -m benchmark.run_bench --mode fixtures` 自检通过。
+  - 同时纠正了文档里的事实错误：源 PDF 是 11,138 非空页 / 平均 211 字符每页，且**一个分块就是一整页**
+    （不是原以为的「1000 字符≈5 页、全库约 2,900–3,000 分块」，实际约 11,138 分块）。
+- 明确未做：全库未建（11,138 分块的耗时与费用只适合里程碑跑，脚本已支持 `--profile full`）；
+  成本估算留空（Phase 10）；LangSmith 真实连通性未验证（本环境无 Key，仅用假客户端覆盖调用序列）。
+- 涉及提交：见本阶段提交（建库脚本 / 回答评测 / 页区间与指标 / 测试 / 文档与基线）
+
+---
+
 ## [Phase 5] 2026-09-30 — 可观测性：request_id / span 树 / LangSmith 追踪 / 指标端点
 
 - 类型：新增功能

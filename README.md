@@ -443,6 +443,12 @@ uv run python -m benchmark.run_bench --mode kb --kb-id 3 --update-readme
 
 # 再加回答指标（要点命中率 / 引用精度 / 拒答正确率，会调用 LLM 产生费用）
 uv run python -m benchmark.run_bench --mode kb --kb-id 3 --answer --update-readme
+
+# 建评测库（从 data/uploads/龙族.pdf 按页窗口构建，产出 manifest）
+uv run scripts/build_eval_kb.py --profile small --name dragon_king_small --owner admin
+
+# 回答侧评测：judge 正确性 / 忠实度 / token / 失败归因 → docs/reports/eval-<日期>-<label>.md
+uv run scripts/eval_answer.py --from-result benchmark/results/<上面的结果 json>
 ```
 
 - `fixtures` 模式只验证脚本与指标算法（mock embedding 没有语义能力），**不写表也不落盘**，避免把自检数字当成成绩；
@@ -451,10 +457,15 @@ uv run python -m benchmark.run_bench --mode kb --kb-id 3 --answer --update-readm
 <!-- BEGIN BENCHMARK -->
 | 日期 | 配置 | 题数 | Recall@k | MRR | 页命中率 | 要点命中率 | 引用精度 | 拒答正确率 | 检索 p50 | 检索 p95 | 端到端 p50 | 结果文件 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2026-09-30 | kb1/openrouter:liquid/lfm-2.5-embedding-350m:free/hybrid/k=8+answer | 9 | 75.0% | 0.688 | 62.5% | 75.0% | 27.5% | 100.0% | 1641.3 ms | 1978.4 ms | 1534.3 ms | `benchmark/results/2026-09-30-kb-kb1-openrouter-liquid-lfm-2-5-embedding-350m-free-hybrid-k-8-answer.json` |
 <!-- END BENCHMARK -->
 
 表格由 `--update-readme` 写入，**不要手工编辑标记之间的区域**；kb 模式每次还在 `benchmark/results/`
 留一份含逐题明细的 JSON，便于回溯。指标口径与注意事项见 `benchmark/README.md`。
+
+回答侧的 judge 正确性 / 忠实度 / 失败归因在 `docs/reports/eval-*.md`，建库的页窗口与配置快照在
+`docs/reports/eval-kb-*.json`。**引用里的页码是源 PDF 的物理页号**（不是子 PDF 的局部页号），
+建库脚本不做任何重编号——这一点踩过坑：重编号会让引用翻不到原文、评测锚点全部对不上。
 
 ## 部署
 

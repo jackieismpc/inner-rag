@@ -187,7 +187,7 @@ flowchart TB
 （Recall@8 50.0% / MRR 0.500 / 页命中率 43.8%），zvec 检索延迟更低（p50 1.8ms vs chroma 3.5ms）。
 
 **明确不做**：不写 LangChain 集成层、不做格式转换 / 双写 / 灰度切换、不做远程向量服务化、
-不在本阶段加 `page_start` / `page_end`（留给 Phase 6）。
+`page_start` / `page_end` 在 Phase 6 补齐（见 Phase 6 的 as-built）。
 
 ### Phase 5 — 可观测性：LangSmith 追踪 + 运行日志 + 指标（原 Phase 3）| ✅ 已完成
 
@@ -248,7 +248,7 @@ changelog 与密钥自检）。
 **DoD**：一次 `/api/chat/send` 能在 LangSmith 看到完整 trace（父子 run + 耗时 + token 用量），
 本地 JSON 日志能用同一个 request_id 串起全部日志；关闭 LangSmith 时行为与现状一致。
 
-### Phase 6 — 评测体系与准确性基线（龙族真实语料）
+### Phase 6 — 评测体系与准确性基线（龙族真实语料）✅ 已完成（2026-09-30）
 
 **目标**：把「答得准不准」变成数字，并让每次改动可对比。
 
@@ -279,9 +279,34 @@ changelog 与密钥自检）。
 - 联网：小库评测跑一次，产出报告并记录基线数字。
 
 **DoD**：`uv run python -m benchmark.run_bench --mode kb --kb-id <小库> --answer --update-readme` 能产出
-检索与回答两组指标（脚本已可用，`judge` 类指标待 `scripts/eval_answer.py` 补齐）；「Sakura 是谁？」
-这类别名问题回答必须命中「路明非」，且引用片段确实包含该结论；基线数字同时写入 `docs/evaluation.md`
-的「基线」表与 README 基准表。
+检索与回答两组指标；「Sakura 是谁？」这类别名问题回答必须命中「路明非」，且引用片段确实包含该结论；
+基线数字同时写入 `docs/evaluation.md` 的「基线」表与 README 基准表。
+
+**as-built（2026-09-30，kb_id=1 / dragon_king_small）**
+
+- 建库：`scripts/build_eval_kb.py --profile small` —— 解析源 PDF（11,138 非空页）后按窗口筛选
+  227 页入库，**保留源 PDF 页号**，产出 `docs/reports/eval-kb-2026-09-30-small.json`
+  （页窗口 / 分块数 / embedding identity / sha256 / 耗时 312.8s）。入库偶发 `Connection error`
+  （免费 embedding 后端），脚本内置 3 次退避重试；失败时**不落盘 manifest**，避免留下空库记录。
+- 回答评测：`scripts/eval_answer.py`（judge 正确性 + 忠实度 + token + 失败归因 + 与上次对比）
+  → `docs/reports/eval-2026-09-30-small-hybrid-k-8-th-0.3.md`，judge = `deepseek:deepseek-flash`、
+  prompt `v1`（换模型或改 prompt 必须换版本号，否则分数不可比）。
+- 引用可核对性：`page_start` / `page_end` 已进 `CHUNK_METADATA_FIELDS`、zvec schema 与 SSE `sources`；
+  命中判定改用区间口径（`metrics.spans_*`）。已建的 collection 改不了 schema，**旧索引需重建**。
+- LangSmith 联动：`benchmark/langsmith_sync.py`（dataset 同步 + 逐条 feedback），关闭时是 no-op；
+  **未用真实 Key 验证**（本环境无 `LANGSMITH_API_KEY`），调用序列由假客户端的用例覆盖。
+- 基线数字（9 题：8 正 + 1 负）：Recall@8 **75.0%** / MRR 0.688 / 页命中率 62.5% /
+  要点命中率 75.0% / 引用精度 **27.5%** / judge 正确率 75.0% / 忠实度 87.5% /
+  拒答正确率 100.0% / 误拒率 12.5%。检索 p50 1,641ms。
+- 失败归因：`nonno-real-name` 阈值过严（8 条召回全被 th=0.3 挡掉）、`erie-lingyan` 检索失败
+  （召回页与证据页无关）——两者指向 Phase 8 的两类不同改进（阈值与分块/embedding）。
+
+**明确未做（不是遗漏）**
+
+1. **全库未建**：11,138 分块的嵌入耗时与费用不适合在本阶段跑，脚本支持 `--profile full`，
+   留到里程碑（L3）再执行；
+2. **成本估算留空**：单价属计费域，脚本默认 0 并在报告里标注「未配置价格表」（Phase 10）；
+3. **LangSmith 真实连通性**：无 Key，未做端到端验证。
 
 ### Phase 7 — 可插拔深化（provider / 关系库 / 缓存 / 队列）
 
