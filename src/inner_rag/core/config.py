@@ -138,6 +138,16 @@ class Settings(BaseSettings):
     # ── Async worker ───────────────────────────────────────────────────
     EMBEDDING_CONCURRENCY: int = 3
     EMBED_BATCH_SIZE: int = 20
+    # 后台任务队列：inprocess（默认，进程内 asyncio worker）| inline（同步执行）
+    # | 第三方实现（注册 entry point 后填它的名字）
+    TASK_QUEUE_BACKEND: str = "inprocess"
+    # 同时处理的入库任务数上限：免费 embedding 额度经不起并发冲击
+    TASK_QUEUE_CONCURRENCY: int = 2
+    # 单任务失败后的重试次数（入库失败多为上游抖动，重试前先退避）
+    TASK_QUEUE_MAX_RETRIES: int = 1
+    TASK_QUEUE_RETRY_BACKOFF: float = 5.0
+    # 队列状态里保留的最近任务记录条数（有界，避免长跑进程里状态表无限增长）
+    TASK_QUEUE_HISTORY: int = 200
 
     # ── CORS ───────────────────────────────────────────────────────────
     CORS_ORIGINS: str = "http://localhost:3000,http://127.0.0.1:3000"

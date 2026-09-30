@@ -1,7 +1,13 @@
 """文档处理服务：解析 -> 分块 -> 向量化入库，以及删除。
 
-约定：所有对外方法自行创建并关闭数据库会话。这样后台任务、脚本与 API 层都能安全调用，
-不会出现「请求级 Session 在响应返回时已关闭，后台任务却还在使用它」的问题。
+约定：
+
+* 所有对外方法自行创建并关闭数据库会话。这样后台任务、脚本与 API 层都能安全调用，
+  不会出现「请求级 Session 在响应返回时已关闭，后台任务却还在使用它」的问题；
+* 处理入口 ``process_document`` 失败时**抛异常**（原因同时写进 ``document.error_msg``）：
+  任务队列靠这个异常决定是否重试，脚本调用方也能看见失败而不是静默返回；
+  批量场景（HTTP 上传、路径导入）统一走 ``enqueue_processing``，由它把失败收敛成日志
+  ——一个文档失败不该让整批导入重跑（重跑会重复落库）。
 """
 
 from __future__ import annotations
@@ -22,9 +28,14 @@ from inner_rag.models import DocStatus, Document, KnowledgeBase
 from inner_rag.services.cache import query_cache
 from inner_rag.services.embedding import ensure_embedding_matches
 from inner_rag.services.parser import parser
+from inner_rag.services.task_queue import task_queue
 from inner_rag.services.vector_store import vector_service
 
 UPLOAD_CHUNK_SIZE = 1024 * 1024  # 1 MiB
+
+
+class DocumentProcessingError(RuntimeError):
+    """文档处理失败。原因已写进 ``document.error_msg``（用户可见）与日志。"""
 
 
 class DocumentService:
@@ -74,18 +85,50 @@ class DocumentService:
     # ── 处理流程 ───────────────────────────────────────────────────────
 
     async def process_document(self, doc_id: int) -> None:
-        """后台任务入口：自建会话，处理单个文档。"""
+        """任务入口：自建会话，处理单个文档；失败抛 ``DocumentProcessingError``。"""
         db = SessionLocal()
         try:
-            await self._process(db, doc_id)
+            completed = await self._process(db, doc_id)
         finally:
             db.close()
+        if not completed:
+            raise DocumentProcessingError(f"文档处理失败（详见文档状态）: doc_id={doc_id}")
 
-    async def _process(self, db: Session, doc_id: int) -> None:
+    async def enqueue_processing(self, doc_id: int) -> str | None:
+        """把「处理该文档」交给任务队列。
+
+        返回 task_id（``inline`` 后端返回的 id 没有查询意义）。失败原因已写进文档状态，
+        这里只记日志：批量上传 / 导入的语义是「已受理」，不该因为其中一个文档失败而整体报错，
+        更不该让整批导入被队列重跑（重跑会重复落库）。
+        """
+        try:
+            return await task_queue.submit("doc.process", self.process_document, doc_id)
+        except DocumentProcessingError as exc:
+            logger.error(f"[DOC] 处理失败 doc_id={doc_id}: {exc}")
+            return None
+
+    async def enqueue_import(self, kb_id: int, path: str, recursive: bool) -> str | None:
+        """把「按路径导入」交给任务队列。
+
+        与 ``enqueue_processing`` 同理：导入是「已受理」语义，中途失败（路径消失、权限变化）
+        只记日志——用户在文档列表里能直接看到哪些文档 ``failed``。
+        """
+        try:
+            return await task_queue.submit(
+                "doc.import_path", self.import_from_path, kb_id, path, recursive
+            )
+        except Exception as exc:
+            logger.error(f"[DOC] 导入失败 kb={kb_id} path={path!r}: {exc}")
+            return None
+
+    async def _process(self, db: Session, doc_id: int) -> bool:
+        """处理单个文档，返回是否完成（失败已写进 ``document.error_msg``）。"""
         doc = db.get(Document, doc_id)
         if doc is None:
-            logger.error(f"[DOC] 文档不存在: {doc_id}")
-            return
+            # 文档在排队期间被删掉是正常情况（删除文档与重新处理可以并发发生）：
+            # 这里当作「无需处理」，既不该重试也不该报错
+            logger.warning(f"[DOC] 文档已不存在，跳过处理: doc_id={doc_id}")
+            return True
 
         doc.status = DocStatus.PROCESSING
         doc.error_msg = None
@@ -130,11 +173,13 @@ class DocumentService:
             await query_cache.invalidate_kb(doc.kb_id)
             metrics.increment("rag_ingest_documents_total", labels={"status": "completed"})
             logger.info(f"[DOC] 处理完成: {doc.filename}, chunks={chunk_count}")
+            return True
         except Exception as exc:
             logger.error(f"[DOC] 处理失败 doc_id={doc_id}: {exc}")
             metrics.increment("rag_ingest_documents_total", labels={"status": "failed"})
             db.rollback()
             self._mark_failed(db, doc_id, exc)
+            return False
 
     @staticmethod
     def _mark_failed(db: Session, doc_id: int, exc: Exception) -> None:
@@ -213,7 +258,7 @@ class DocumentService:
             db.close()
 
         for doc_id in doc_ids:
-            await self.process_document(doc_id)
+            await self.enqueue_processing(doc_id)
         return doc_ids
 
     # ── 删除 ───────────────────────────────────────────────────────────

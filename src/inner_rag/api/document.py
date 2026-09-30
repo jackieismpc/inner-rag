@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from fastapi import (
     APIRouter,
-    BackgroundTasks,
     Depends,
     File,
     Form,
@@ -61,13 +60,12 @@ def list_docs(
 
 @router.post("/upload", response_model=ResponseModel)
 async def upload_files(
-    background_tasks: BackgroundTasks,
     kb_id: int = Form(...),
     files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """上传文件到指定知识库（流式落盘 + 大小限制，随后交给后台任务处理）。"""
+    """上传文件到指定知识库（流式落盘 + 大小限制，随后交给任务队列处理）。"""
     ensure_kb_access(db, kb_id, user, AccessLevel.WRITE)
     if not files:
         raise HTTPException(status_code=400, detail="未选择文件")
@@ -100,9 +98,9 @@ async def upload_files(
         db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # 后台任务只接收 doc_id，自己创建会话（请求级 Session 在响应返回后即关闭）
+    # 任务只接收 doc_id，自己创建会话（请求级 Session 在响应返回后即关闭）
     for doc_id in doc_ids:
-        background_tasks.add_task(doc_service.process_document, doc_id)
+        await doc_service.enqueue_processing(doc_id)
 
     logger.info(f"[DOC] 上传 {len(doc_ids)} 个文件到 kb={kb_id} user={user.username}")
     return ResponseModel(
@@ -113,7 +111,6 @@ async def upload_files(
 
 @router.post("/import-path", response_model=ResponseModel)
 async def import_from_local_path(
-    background_tasks: BackgroundTasks,
     body: LocalPathImport,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
@@ -128,7 +125,7 @@ async def import_from_local_path(
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
 
-    background_tasks.add_task(doc_service.import_from_path, body.kb_id, body.path, body.recursive)
+    await doc_service.enqueue_import(body.kb_id, body.path, body.recursive)
     return ResponseModel(message=f"正在导入路径: {body.path}")
 
 
@@ -156,7 +153,6 @@ async def delete_doc(
 @router.post("/{doc_id}/reprocess", response_model=ResponseModel)
 async def reprocess_doc(
     doc_id: int,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
@@ -167,5 +163,5 @@ async def reprocess_doc(
     doc.error_msg = None
     db.commit()
 
-    background_tasks.add_task(doc_service.process_document, doc_id)
+    await doc_service.enqueue_processing(doc_id)
     return ResponseModel(message="已重新提交处理")

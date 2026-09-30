@@ -22,6 +22,7 @@ from inner_rag.providers import (
 from inner_rag.providers.specs import ProviderError, chat_spec, embedding_spec
 from inner_rag.services.cache import embedding_cache, query_cache
 from inner_rag.services.retrieval_log import RetrievalStats
+from inner_rag.services.task_queue import task_queue
 
 router = APIRouter(prefix="/api/system", tags=["系统"])
 
@@ -96,11 +97,12 @@ async def list_providers(user: User = Depends(get_current_user)):
 
 @router.get("/stats")
 async def get_stats(user: User = Depends(get_current_user)):
-    """检索命中率 + 缓存状态。"""
+    """检索命中率 + 缓存状态 + 后台队列状态。"""
     return {
         "retrieval": RetrievalStats.summary(),
         "query_cache": query_cache.stats(),
         "embedding_cache": embedding_cache.stats(),
+        "task_queue": task_queue.summary(),
     }
 
 

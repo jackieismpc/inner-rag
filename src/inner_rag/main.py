@@ -18,6 +18,7 @@ from inner_rag.core.observability import tracer
 from inner_rag.core.security import verify_production_secret
 from inner_rag.providers import ProviderError, chat_health, embedding_health
 from inner_rag.services.retrieval_log import setup_rag_loggers
+from inner_rag.services.task_queue import task_queue
 
 # 日志格式（text / json）与 sink 由 core/logging.py 统一配置：
 # 那里还要负责把 request_id 与 user 注入每条日志，放在入口处只是「什么时候配」的决定。
@@ -36,6 +37,9 @@ async def lifespan(app: FastAPI):
         f"追踪: {tracer.status()['backend']} | 日志格式: {settings.LOG_FORMAT} | "
         f"指标后端: {settings.METRICS_BACKEND}"
     )
+    # 需要 worker 的队列实现（inprocess）在这里起停；inline 实现是空操作
+    await task_queue.start()
+    logger.info(f"任务队列: {task_queue.summary()}")
     # 启动时只做配置校验（不发网络请求），配置有问题不阻断启动：
     # 服务照常起，/api/system/health 会给出可读原因
     for kind, health in (("LLM", chat_health(probe=False)), ("Embedding", embedding_health())):
@@ -45,6 +49,7 @@ async def lifespan(app: FastAPI):
             logger.warning(f"{kind} provider 配置有误: {health['error']}")
     logger.info(f"OCR 后端: {settings.OCR_BACKEND}")
     yield
+    await task_queue.stop()
     logger.info("服务已停止")
 
 

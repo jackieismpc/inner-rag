@@ -40,6 +40,9 @@ os.environ.update(
         "EMBEDDING_PROVIDER": "mock",
         "EMBEDDING_MAX_INPUT_CHARS": "0",
         "VECTOR_STORE": "zvec",
+        # 任务队列：测试要确定性 —— inline 让文档在响应返回前就处理完（与原先
+        # BackgroundTasks 的行为一致）；inprocess 的并发/重试/状态由 test_task_queue.py 覆盖
+        "TASK_QUEUE_BACKEND": "inline",
         # 追踪与日志格式同理：开发者本机开了 LangSmith 也不能让离线用例联网
         "LANGSMITH_TRACING": "false",
         "LOG_FORMAT": "text",
