@@ -11,11 +11,14 @@ EMBEDDING_PROVIDER），本模块不关心是 Ollama 还是云端 API。
 from __future__ import annotations
 
 import asyncio
+import math
 
 from langchain_core.embeddings import Embeddings
 from loguru import logger
 
 from inner_rag.core.config import settings
+from inner_rag.core.metrics import metrics
+from inner_rag.core.observability import tracer
 from inner_rag.providers import get_embeddings
 from inner_rag.services.cache import embedding_cache
 
@@ -110,32 +113,38 @@ class EmbeddingService(Embeddings):
     # ── 异步路径（入库与检索）──────────────────────────────────────────
 
     async def aembed_documents(self, texts: list[str]) -> list[list[float]]:
+        """批量嵌入：入库时的主要成本项，因此单独成 span 并记缓存命中率。"""
         if not texts:
             return []
 
-        vectors, miss_indices = await embedding_cache.get_batch(texts)
-        if not miss_indices:
-            logger.debug(f"[EMBEDDING] 全部命中缓存 ({len(texts)} 条)")
+        async with tracer.span("embed.documents", count=len(texts), identity=self.identity) as span:
+            vectors, miss_indices = await embedding_cache.get_batch(texts)
+            hits = len(texts) - len(miss_indices)
+            span.set(cache_hits=hits, cache_misses=len(miss_indices))
+            if hits:
+                metrics.increment("rag_cache_hits_total", hits, labels={"namespace": "embedding"})
+            if not miss_indices:
+                return _finalize(vectors, len(texts))
+
+            miss_texts = [texts[i] for i in miss_indices]
+            span.set(batch_count=math.ceil(len(miss_texts) / settings.EMBED_BATCH_SIZE))
+            computed = await self._embed_in_batches(miss_texts)
+            await embedding_cache.set_batch(miss_texts, computed)
+            for index, vector in zip(miss_indices, computed, strict=True):
+                vectors[index] = vector
             return _finalize(vectors, len(texts))
 
-        miss_texts = [texts[i] for i in miss_indices]
-        computed = await self._embed_in_batches(miss_texts)
-        await embedding_cache.set_batch(miss_texts, computed)
-        for index, vector in zip(miss_indices, computed, strict=True):
-            vectors[index] = vector
-        logger.debug(
-            f"[EMBEDDING] {len(texts) - len(miss_indices)} 命中 / {len(miss_indices)} 未命中"
-        )
-        return _finalize(vectors, len(texts))
-
     async def aembed_query(self, text: str) -> list[float]:
-        cached = await embedding_cache.get(text)
-        if cached is not None:
-            return cached
-        async with self._get_semaphore():
-            vector = await self.embeddings.aembed_query(text)
-        await embedding_cache.set(text, vector)
-        return vector
+        async with tracer.span("embed.query") as span:
+            cached = await embedding_cache.get(text)
+            span.set(cache_hit=cached is not None)
+            if cached is not None:
+                metrics.increment("rag_cache_hits_total", labels={"namespace": "embedding"})
+                return cached
+            async with self._get_semaphore():
+                vector = await self.embeddings.aembed_query(text)
+            await embedding_cache.set(text, vector)
+            return vector
 
     async def _embed_in_batches(self, texts: list[str]) -> list[list[float]]:
         result: list[list[float]] = []

@@ -16,6 +16,8 @@ from sqlalchemy.orm import Session
 
 from inner_rag.core.config import settings
 from inner_rag.core.database import SessionLocal
+from inner_rag.core.metrics import metrics
+from inner_rag.core.observability import tracer
 from inner_rag.models import DocStatus, Document, KnowledgeBase
 from inner_rag.services.cache import query_cache
 from inner_rag.services.embedding import ensure_embedding_matches
@@ -96,10 +98,26 @@ class DocumentService:
             if not doc.file_path:
                 msg = f"文档缺少服务端存储路径，无法解析: doc_id={doc.id}"
                 raise ValueError(msg)
-            documents, meta = parser.parse(doc.file_path, doc.filename)
-            chunk_count = await vector_service.add_documents(
-                kb_id=doc.kb_id, documents=documents, doc_id=doc.id, filename=doc.filename
-            )
+            # 入库链路是一棵独立的 trace 树（kind=ingest）：它跑在后台任务里，
+            # 没有 HTTP 响应可挂，只能靠 request_id 与上传请求对上。
+            async with tracer.span(
+                "ingest.document",
+                kind="ingest",
+                kb_id=doc.kb_id,
+                doc_id=doc.id,
+                filename=doc.filename,
+                ocr_backend=settings.OCR_BACKEND,
+            ) as root:
+                async with tracer.span("parse", filename=doc.filename) as parse_span:
+                    documents, meta = parser.parse(doc.file_path, doc.filename)
+                    parse_span.set(chunk_count=len(documents), chars=meta.get("total_chars", 0))
+                async with tracer.span(
+                    "vector.ingest", kb_id=doc.kb_id, chunk_count=len(documents)
+                ):
+                    chunk_count = await vector_service.add_documents(
+                        kb_id=doc.kb_id, documents=documents, doc_id=doc.id, filename=doc.filename
+                    )
+                root.set(chunk_count=chunk_count, chars=meta.get("total_chars", 0))
 
             doc.status = DocStatus.COMPLETED
             doc.chunk_count = chunk_count
@@ -110,9 +128,11 @@ class DocumentService:
 
             # 新内容入库后必须让检索缓存失效，否则会持续返回旧结果
             await query_cache.invalidate_kb(doc.kb_id)
+            metrics.increment("rag_ingest_documents_total", labels={"status": "completed"})
             logger.info(f"[DOC] 处理完成: {doc.filename}, chunks={chunk_count}")
         except Exception as exc:
             logger.error(f"[DOC] 处理失败 doc_id={doc_id}: {exc}")
+            metrics.increment("rag_ingest_documents_total", labels={"status": "failed"})
             db.rollback()
             self._mark_failed(db, doc_id, exc)
 

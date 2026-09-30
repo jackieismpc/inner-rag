@@ -191,7 +191,7 @@ async def send_message(
 
     try:
         answer, sources = await rag_service.chat(
-            body.kb_id, body.question, history, strategy=strategy
+            body.kb_id, body.question, history, strategy=strategy, conv_id=conv.id
         )
     except ProviderError as exc:
         # 模型后端没配好：503 + 直接给出该怎么改 .env
@@ -235,7 +235,9 @@ async def stream_message(
         full_answer = ""
         sources: list[dict] = []
         try:
-            async for chunk in rag_service.chat_stream(kb_id, question, history, strategy=strategy):
+            async for chunk in rag_service.chat_stream(
+                kb_id, question, history, strategy=strategy, conv_id=conv_id
+            ):
                 event = _parse_sse_event(chunk)
                 if event is not None:
                     event_type, data = event
