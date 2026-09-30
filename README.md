@@ -26,7 +26,7 @@
 
 `inner-rag` 把企业里散落的文档（PDF / Word / Excel / 纯文本，扫描件与图片走 OCR）解析、分块、向量化
 入库，再基于「向量检索 + 引用溯源 + 流式问答」回答问题。Chat 模型与 Embedding 模型是两个**互相独立的
-可插拔后端**：同一条链路既能跑本地 Ollama（全离线），也能直接接 OpenRouter / DeepSeek / 任意 OpenAI
+可插拔后端**：同一条链路既能跑本地推理服务（vLLM / SGLang / Ollama，全离线），也能直接接 OpenRouter / DeepSeek / 任意 OpenAI
 兼容网关，改两个环境变量即可切换，业务代码、接口与数据库都不用动。
 
 **七个插件点，同一套契约。** Chat provider、Embedding provider、向量库、缓存、任务队列、精排（rerank）、
@@ -51,7 +51,7 @@
 | --- | --- |
 | 语言 / 包管理 | Python 3.13（uv 管理）、`uv.lock` 锁定依赖 |
 | Web 框架 | FastAPI 0.141+、Uvicorn 0.54+、SSE 流式响应 |
-| LLM 编排 | LangChain 1.x + `langchain-ollama`（本地）/ `langchain-openai`（OpenAI 兼容云端）/ `langchain-deepseek`（官方集成） |
+| LLM 编排 | LangChain 1.x + `langchain-ollama`（本地 Ollama）/ `langchain-openai`（OpenAI 兼容：云端 + 本地 vLLM/SGLang）/ `langchain-deepseek`（官方集成） |
 | 向量库 | **zvec 0.7.0**（[Alibaba 开源](https://github.com/alibaba/zvec)嵌入式向量库，HNSW + cosine，默认后端）；ChromaDB 1.5+ 与 `memory`（零依赖进程内）为兼容实现 |
 | 关系库 | SQLite（开发默认）+ PostgreSQL 16（部署可选）+ SQLAlchemy 2.1 + Alembic 1.20 |
 | 认证与权限 | JWT（PyJWT，HS256）+ argon2id（argon2-cffi）+ 知识库级 ACL |
@@ -70,8 +70,8 @@
 ## Quick Start
 
 前置条件：Linux / macOS（Windows 建议 WSL2）+ [uv](https://docs.astral.sh/uv/)（会自行安装 Python 3.13）。
-模型三选一：云端 API（需 OpenRouter / DeepSeek 的 key，推荐）/ 本地 [Ollama](https://ollama.com/)（全离线）/
-`mock`（零依赖，仅演示与验收链路）。数据库开发默认 SQLite 单文件，**无需任何安装**。
+模型三选一：云端 API（需 OpenRouter / DeepSeek 的 key）/ 本地推理服务（vLLM / SGLang 跑 Qwen2.5-32B，
+默认，见 `docs/operations.md` 3.5）/ `mock`（零依赖，仅演示与验收链路）。数据库开发默认 SQLite 单文件，**无需任何安装**。
 
 ```bash
 # 1. 安装依赖

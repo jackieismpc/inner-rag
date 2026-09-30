@@ -56,7 +56,7 @@
 
 | 领域 | 现状 | 缺口 |
 | --- | --- | --- |
-| 模型后端 | `providers/` 抽象层：Chat `ollama / openrouter / deepseek / openai / mock`，Embedding `ollama / openrouter / openai / mock`；实例缓存、探活与模型发现、`ProviderError` → 503 | 插件注册是硬编码分支（`specs._build` + `chat.build_chat_model`），第三方扩展要改源码 |
+| 模型后端 | `providers/` 抽象层：Chat `ollama / openrouter / deepseek / openai / vllm / mock`，Embedding `ollama / openrouter / openai / mock`；实例缓存、探活与模型发现、`ProviderError` → 503 | 插件注册是硬编码分支（`specs._build` + `chat.build_chat_model`），第三方扩展要改源码 |
 | 向量库 | **zvec 已是默认后端**（Alibaba 开源嵌入式向量库，见第 9 节 ADR）：按知识库分 collection、cosine 空间、三策略检索（similarity / mmr / hybrid）、真实相关度；`VectorStore` 契约在 `services/vector_store/base.py`，chroma 保留为兼容实现 | 存量 Chroma 库需用 `scripts/reindex_kb.py` 重建到 zvec；内嵌 zvec 单进程写（见风险登记簿）。注意 `hybrid` 策略目前是 `similarity + MMR`，**不是稠密 + 稀疏（BM25）**，命名待澄清 |
 | 关系库 | SQLAlchemy 2.1 + Alembic；SQLite（开发默认，WAL + 外键 + 等锁超时）与 PostgreSQL 共用一套迁移 | 服务层直接写 ORM/会话，没有 repository 边界；无 MySQL 等第三方方言验证 |
 | 缓存 | 进程内 LRU（query cache 按 kb 精确失效 + embedding cache 按 `provider:model` 隔离） | 多 worker 下失效；没有 Redis 等外部后端 |
@@ -102,7 +102,7 @@ flowchart TB
         P10["Identity / Access"]
     end
     subgraph IMPL["内置实现（Adapters）"]
-        A1["ollama / openrouter / deepseek / openai / mock"]
+        A1["ollama / openrouter / deepseek / openai / vllm / mock"]
         A2["zvec（内置目标实现；chroma 兼容，+ 预留 pgvector）"]
         A3["sqlite / postgresql"]
         A4["memory LRU（+ 预留 redis）"]

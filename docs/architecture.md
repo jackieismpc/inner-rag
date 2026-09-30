@@ -17,7 +17,7 @@
 - **身份与访问控制**：本地账号 + JWT（HS256）登录，密码只存 argon2id 哈希（带随机盐），停用账号立即失效；
   知识库级 ACL 分 `read`（看库 / 提问）/ `write`（+ 增删文档）/ `owner`（+ 改设置 / 删库 / 授权成员）三级，
   列表按「我拥有或被授权」过滤
-- **模型后端可插拔**：Chat 与 Embedding 各自独立选型（Ollama / OpenRouter / DeepSeek / OpenAI 兼容 /
+- **模型后端可插拔**：Chat 与 Embedding 各自独立选型（Ollama / OpenRouter / DeepSeek / OpenAI 兼容 / vLLM /
   离线 mock），只改 `.env`；provider 名写错或漏填 Key 时得到「该去 `.env` 改哪个变量」的明确提示（503）。
   七个插件点（provider / 向量库 / 缓存 / 队列 / 关系库 / 精排 / 查询改写）统一走 `plugins/` 注册表，
   第三方包可用 entry point 注册实现而**不改本项目源码**；`GET /api/system/plugins` 可查当前后端与全部可选项
@@ -167,7 +167,7 @@ api  →  services  →  providers / repositories / plugins / core
 
 | 插件点 | 接口/门面（现状） | 内置实现 | 配置项 | 探活 | 契约测试 |
 | --- | --- | --- | --- | --- | --- |
-| Chat 模型 | `providers/factory.py::get_chat_model` + `plugins.chat_providers` | ollama / openrouter / deepseek / openai / mock | `LLM_PROVIDER`、`*_CHAT_MODEL`、`*_API_KEY`、`LLM_REASONING_EFFORT` | `chat_health()` → `/api/system/health` | `tests/test_providers.py`、`tests/test_plugins.py` |
+| Chat 模型 | `providers/factory.py::get_chat_model` + `plugins.chat_providers` | ollama / openrouter / deepseek / openai / vllm / mock | `LLM_PROVIDER`、`*_CHAT_MODEL`、`*_API_KEY`、`LLM_REASONING_EFFORT` | `chat_health()` → `/api/system/health` | `tests/test_providers.py`、`tests/test_plugins.py` |
 | Embedding 模型 | `providers/factory.py::get_embeddings` + `plugins.embedding_providers` | **sentence_transformers（默认，本机跑 Qwen 开源权重）**、ollama / openrouter / openai / mock | `EMBEDDING_PROVIDER`、`*_EMBEDDING_MODEL`、`SENTENCE_TRANSFORMERS_MODEL/DEVICE/BATCH_SIZE/NORMALIZE/ALLOW_DOWNLOAD`、`HF_ENDPOINT`、`EMBEDDING_MAX_INPUT_CHARS` | `provider_catalog()` → `/api/system/providers` | `tests/test_providers.py`、`tests/test_embedding.py`、`tests/test_plugins.py` |
 | 向量库 | `services/vector_store/`（`base.VectorStore` 契约 + `plugins.vector_stores` 注册表） | **zvec**（默认，Alibaba 开源嵌入式向量库）；chroma 兼容实现（cosine，每库一 collection）；memory（零依赖、进程内，测试与演练用） | `VECTOR_STORE`、`ZVEC_PATH`、`CHROMA_*`（仅 chroma）、`CHUNK_SIZE`、`CHUNK_OVERLAP` | `count(kb_id)` 与关系库对账（`scripts/check_vectors.py`）+ 冒烟链路上的上传 → 检索 | `tests/test_vector_store.py`（同一份契约参数化跑三个后端，含断点续跑） |
 | 精排（rerank） | `services/rerank.py`（`Reranker` Protocol + `plugins.rerankers`） | none（默认，不改顺序）、lexical（按「查询词元在候选集内的稀有度加权覆盖率」稳定重排，免模型）、llm（listwise，让模型返回编号序列） | `RERANK_BACKEND`、`RERANK_LLM_TOP_N`、`RERANK_LLM_SNIPPET_CHARS` | `reranker.is_enabled()`；`/api/system/plugins` 报当前后端 | `tests/test_rerank.py`（含「接进检索层的时机」与「实现违约时退回原顺序」用例） |

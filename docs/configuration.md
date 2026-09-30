@@ -137,10 +137,13 @@ EMBEDDING_MAX_INPUT_CHARS=400    # 见下方「小上下文模型」说明
 > 免费的 `liquid/lfm-2.5-embedding-350m:free`（1024 维）只有 **512 token** 上下文，建议同时设
 > `EMBEDDING_MAX_INPUT_CHARS=400`；免费路由的数据可能被上游留存，有合规要求时换付费模型或改本地嵌入。
 
-### 3.3 本地 Ollama（全离线对话 + 向量）
+### 3.3 本地对话（vLLM / SGLang 或 Ollama，全离线）
+
+本地对话默认走 **vLLM / SGLang** 部署的 Qwen2.5-32B（见 §3.5，跑大模型、吞吐高）。
+若机器资源有限，也可用更轻的 Ollama：
 
 ```bash
-ollama pull qwen3:14b            # 对话模型
+ollama pull qwen3:14b            # 对话模型（Ollama 备选）
 ollama pull qwen3-embedding:8b   # 向量模型（必须与建库时的 embedding 保持一致）
 ```
 
