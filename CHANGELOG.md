@@ -24,6 +24,56 @@
 
 ---
 
+## [Phase 5] 2026-09-30 — 可观测性：request_id / span 树 / LangSmith 追踪 / 指标端点
+
+- 类型：新增功能
+- 目的：Phase 0–4 把「能跑、能换后端、能控权限」做完了，但线上出问题时只有一个 500 和几行文本日志——
+  跨步骤耗时无法归因（检索慢还是生成慢？），同一次请求的日志串不起来（谁的、哪一次？），
+  效果与成本也没有量化口径。Phase 5 的目标是把「看日志猜」变成「拿 request_id 串日志、
+  拿 session_id 看 trace、拿 metrics 定阈值」。这也是 M2 里程碑的验收内容。
+- 方案：
+  - **request_id 与日志**：`core/logging.py` 把 loguru sink 统一为 `text`（人读）/ `json`（一行一个 JSON）
+    两种格式，结构化字段走 `logger.bind(event=..., ...)`——一处埋点两种格式都成立。
+    `RequestIdMiddleware` 透传或生成 `X-Request-ID`、回写响应头、发访问日志并记请求指标；
+    生成与访问日志放在**同一个**中间件（两者都要包一层 `send`，拆开会让每个响应多一层包装）。
+  - **Tracer 门面**：`core/observability.py` 对外只有 `tracer.span(name, **metadata)` 一个入口，
+    span 树用 contextvar 串父子（调用方不用传 parent）。LangSmith 是**可选 sink**：
+    默认关闭（测试与 CI 零网络零费用）；未配 Key / Client 初始化失败 / 运行中上报失败
+    一律降级为本地计时日志并计 `tracing_errors_total`，**绝不抛给请求**。
+    采样只在根 span 判定（半棵树的 trace 没法排障），失败请求 100% 记录。
+    trace 只记元数据与统计，不记 Prompt 与回答正文。
+  - **埋点**：问答 `rag.request → retrieve → (cache.query | vector.search → embed.query) →
+    prompt.build → llm.generate`；入库 `ingest.document → parse / vector.ingest`（`embed.documents`
+    嵌在后者内，由 `services/embedding.py` 自埋，因此不需要改 `VectorStore` 契约）。
+    为拿 token 用量，模型调用从「一条链 `ainvoke` 出字符串」改成「渲染消息 → `ainvoke` 拿 AIMessage →
+    `StrOutputParser` 取文本」——`usage_metadata` 只在消息对象上。
+  - **指标**：`core/metrics.py`（counter + 有界蓄水池直方图，p50/p95/p99）+
+    `GET /api/system/metrics`（JSON 或 Prometheus 文本，免登录，`METRICS_TOKEN` 非空时用
+    `compare_digest` 校验）。
+- 效果：
+  - `uv run pytest -q` → **149 passed, 5 deselected**（Phase 4 为 139）：新增
+    `tests/test_observability.py` 10 条，逐条对应 `docs/observability.md` 第 6 节的 DoD。
+  - `uv run mypy` → Success: no issues found in **48 source files**；`uv run ruff check .` /
+    `ruff format --check .` 全绿；`./scripts/gates.sh g1` 全绿（含迁移
+    upgrade→check→downgrade→upgrade、冒烟探活 + openapi、changelog 与密钥自检）。
+  - DoD 逐项结论（细节见 `docs/observability.md` 第 6 节表格）：
+    ① 默认本地后端、关闭时**零网络调用**（把 `httpx` 两个 transport 换成「一调用即抛」，
+    跑完整问答仍 200）；② 上报失败请求仍 200 且 `tracing_errors_total` 计数；
+    ③ `LOG_FORMAT=json` 每行可 `json.loads`，`request_id` 在响应头与日志里同值、上游传来的原样透传；
+    ④ span 父子层级（含 `vector.search → embed.query`）由用例断言；
+    ⑤ `.env.example` / README「可观测性」小节 / `docs/observability.md` 三者一致。
+  - 真实 LangSmith trace（DoD 第 1 条的联网部分）待 G2 执行：需要 `LANGSMITH_API_KEY`，
+    缺 Key 时不阻塞交付，已记入 `docs/observability.md` 的验证表。
+- 明确不做（已写进文档，避免被当成遗漏）：成本指标 `rag_llm_cost_usd_total`
+  （token 单价属计费域，不写没有来源的价格表，留到 Phase 10 的成本看板）；
+  入库链路拆到 `chunk` / `vector.write`（会改 `VectorStore` 契约，留到 Phase 7）；
+  Prometheus 远程写与 OTLP 导出（Phase 10）。
+- 涉及提交：371e4da（core 基建：日志 / 指标 / Tracer / 配置与入口）、6056a2a（问答与入库埋点）、
+  f549c9b（`/api/system/metrics` 端点）、9cb3981（可观测性用例 + conftest 钉死追踪开关）、
+  0c85a7e（文档同步）、本次提交（changelog 条目）
+
+---
+
 ## [Phase 4] 2026-09-29 — 向量库统一到 zvec：VectorStore 契约 + 默认后端切换
 
 - 类型：新增功能
