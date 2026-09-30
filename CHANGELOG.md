@@ -21,6 +21,29 @@
 - **类型**固定五选一，便于区分「增加功能」与「优化」——面试官常问"这是新功能还是优化"，在这里就要能一眼回答。
 - **目的**回答"为什么"，**效果**回答"有没有用"；两者缺一，这条记录就失去价值。
 - **效果**必须能被复现或引用（跑过的命令、通过的用例数、评测指标、trace 链接等）。
+---
+
+## [Phase 5/6] 2026-09-30 — LangSmith 真实连通性打通（trace 与 feedback 双向验证）
+
+- 类型：修复 + 新增功能
+- 目的：Phase 5 的追踪与 Phase 6 的评测回写此前**只在离线侧验证过调用序列**，真实 LangSmith 从未连过。
+  结果是三处「静默失败」：脚本入口不调 `tracer.configure()`（追踪压根没开）、`run_bench` 不记
+  `trace_id`（feedback 回写恒为 0）、`run.post()` 不抛异常被当成上报成功（其实只进了本地队列）。
+  三个问题都不报错，只是什么都不写——不验证就永远发现不了。
+- 方案：
+  - 密钥只从环境变量读（`export LANGSMITH_API_KEY=...`），项目 `.env` 只留非密钥项，避免密钥被复制出去；
+  - `run_bench --answer` 给每题套 `eval.item` span 当树根，把根 run id 写进结果的 `trace_id`；
+  - `eval_answer.py` 打完 judge 分数后按 `trace_id` 回写 `correctness` / `citation_precision` / `faithfulness`；
+  - `create_feedback` 补 `session_id`（不带会走已废弃路径），读回改用 `client.runs.retrieve(..., project_id=)`；
+  - 新增 `scripts/check_langsmith.py`：建 trace → **服务端读回同一条 run** → 同步 dataset → 回写并读回 feedback。
+- 效果（2026-09-30 实跑）：
+  - `uv run scripts/check_langsmith.py --dataset` → `PASS`，`tracing_errors_total=0`，
+    `project_id=bcf62371-...`，读回 run id 与本地一致；
+  - 真实小库 9 题评测回写 **25 条 feedback**，抽查 `sakura-who` 单条 run 读回 3 个分数
+    （correctness=1.0 / citation_precision=0.4 / faithfulness=1.0）；
+  - `uv run pytest -m live -q` → **8 passed**（新增 3 条：trace 往返、feedback 挂到指定 trace、dataset 幂等）；
+  - 离线侧 `uv run pytest -q` → 172 passed，未受影响。
+- 涉及提交：见本次推送（check_langsmith.py / langsmith_sync.py / run_bench.py / eval_answer.py / tests + docs）
 
 ---
 

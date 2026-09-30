@@ -308,6 +308,18 @@ TOKEN=$(curl -s -X POST localhost:8010/api/auth/login \
 - **指标**：`GET /api/system/metrics`（JSON 或 Prometheus 文本）覆盖请求数与延迟分位、检索耗时、
   空召回与阈值过滤数、缓存命中、token 用量、首 token 延迟、入库成功 / 失败数。
 
+开启追踪并自检（**密钥只走环境变量，不要写进 `.env`**）：
+
+```bash
+export LANGSMITH_API_KEY=...        # 环境变量优先级高于 .env，无需改代码
+export LANGSMITH_TRACING=true
+uv run scripts/check_langsmith.py --dataset   # 建 trace → 服务端读回 → 同步 dataset → 回写 feedback
+uv run pytest -m live -q                      # 真实联网用例（默认 deselect）
+```
+
+`check_langsmith.py` 的判定是「**读回来**」而不是「没报错」——上报走后台队列，
+`post()` 成功只代表进了队列，读不到就是没通。
+
 两个必须知道的边界：
 
 1. 指标是**进程内累计**（单 worker 语义）：多副本部署时每个副本各记一份，看板要按实例聚合；
@@ -457,7 +469,7 @@ uv run scripts/eval_answer.py --from-result benchmark/results/<上面的结果 j
 <!-- BEGIN BENCHMARK -->
 | 日期 | 配置 | 题数 | Recall@k | MRR | 页命中率 | 要点命中率 | 引用精度 | 拒答正确率 | 检索 p50 | 检索 p95 | 端到端 p50 | 结果文件 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 2026-09-30 | kb1/openrouter:liquid/lfm-2.5-embedding-350m:free/hybrid/k=8+answer | 9 | 75.0% | 0.688 | 62.5% | 75.0% | 27.5% | 100.0% | 1641.3 ms | 1978.4 ms | 1534.3 ms | `benchmark/results/2026-09-30-kb-kb1-openrouter-liquid-lfm-2-5-embedding-350m-free-hybrid-k-8-answer.json` |
+| 2026-09-30 | kb1/openrouter:liquid/lfm-2.5-embedding-350m:free/hybrid/k=8+answer | 9 | 75.0% | 0.688 | 62.5% | 75.0% | 27.5% | 100.0% | 1238.6 ms | 2176.1 ms | 1442.6 ms | `benchmark/results/2026-09-30-kb-kb1-openrouter-liquid-lfm-2-5-embedding-350m-free-hybrid-k-8-answer.json` |
 <!-- END BENCHMARK -->
 
 表格由 `--update-readme` 写入，**不要手工编辑标记之间的区域**；kb 模式每次还在 `benchmark/results/`

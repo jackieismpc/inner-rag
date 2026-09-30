@@ -173,6 +173,7 @@ LangSmith 开着时，span 的计时日志降到 DEBUG（trace 里有耗时）�
 | 建库慢 / 花费高 | `ingest.document` 子 span 耗时分布 | 嵌入 batch 太小、缓存未命中、免费额度限流 |
 | 配置错误 | `/api/system/health` 的 `llm` / `embedding` 字段 | 见 `docs/architecture.md` 第 6 节的错误契约 |
 | trace 看不到 | 启动日志中的 tracing 状态行 | `LANGSMITH_TRACING=false`、Key 缺失、网络不通（均只告警） |
+| 不确定到底通没通 | `uv run scripts/check_langsmith.py --dataset` | 建 trace → 服务端读回 → 同步 dataset → 回写并读回 feedback，逐步打印 PASS/FAIL |
 
 排障统一入口：**拿 `request_id` 串日志 → 拿 `session_id` 找 LangSmith thread → 在 trace 里定位最慢的 span**。
 
@@ -180,11 +181,27 @@ LangSmith 开着时，span 的计时日志降到 DEBUG（trace 里有耗时）�
 
 | # | DoD | 验证方式 | 结论 |
 | --- | --- | --- | --- |
-| 1 | `/api/chat/send` 在 LangSmith 能看到完整 trace：`retrieve` 与 `llm.generate` 两个子 run，含耗时、token 用量、metadata | 真实链路（G2，需 `LANGSMITH_API_KEY`）；离线侧由 `test_span_tree_nests_chat_steps` 断言 span 父子层级正确 | 离线侧✅；真实上报待 G2 执行（无 Key 时不阻塞交付） |
+| 1 | `/api/chat/send` 在 LangSmith 能看到完整 trace：`retrieve` 与 `llm.generate` 两个子 run，含耗时、token 用量、metadata | 离线侧 `test_span_tree_nests_chat_steps` 断言 span 父子层级；真实侧 `tests/test_langsmith_live.py`（-m live）建 trace 后**从服务端读回同一条 run**，并验证 feedback 挂在它上面 | ✅ 离线 + 真实均已验证（2026-09-30） |
 | 2 | 同一次请求的日志能用 `request_id` 串起来，`LOG_FORMAT=json` 时每行都能 `json.loads` | `test_json_log_lines_are_parseable`、`test_request_id_matches_between_response_and_logs`、`test_request_id_is_passed_through` | ✅ |
 | 3 | `LANGSMITH_TRACING=false`（默认）时零网络调用 | `test_no_network_when_tracing_disabled`：monkeypatch `httpx` 的两个 transport 为「一调用即抛」，跑完整问答仍 200 | ✅ |
 | 4 | 追踪上报失败不影响接口成功率 | `test_tracing_upload_failure_does_not_break_request`：注入必然失败的 `_upload`，断言请求 200 且 `tracing_errors_total` 计数 | ✅ |
 | 5 | `.env.example`、README「可观测性」小节、本文件三者一致 | 人工核对三处配置项与指标清单 | ✅ |
+
+### 6.1 密钥怎么给：只走环境变量，不写进仓库文件
+
+`LANGSMITH_API_KEY` 是唯一会把「配置」变成「泄密」的项，因此约定：
+
+```bash
+export LANGSMITH_API_KEY=...      # 当前 shell，或写进 ~/.zshrc
+export LANGSMITH_TRACING=true
+uv run scripts/check_langsmith.py --dataset
+```
+
+- 项目里的 `.env` **只放非密钥项**（`LANGSMITH_TRACING` / `LANGSMITH_PROJECT`）；`.env` 本身已被
+  `.gitignore` 忽略，但密钥一旦写进去就容易被顺手复制出去，索性不写。
+- `pydantic-settings` 里环境变量优先级高于 `env_file`，所以 export 之后无需改任何代码。
+- 联调时忘了 export 的表现是「追踪未启用，span 只落本地计时日志」——看到这行日志先查环境变量，
+  不要急着改代码。
 
 未做（明确留到后续阶段）：成本指标（Phase 10）、入库链路拆到 `chunk` / `vector.write`（Phase 7）、
 Prometheus 远程写 / OTLP 导出（Phase 10）。

@@ -233,7 +233,14 @@ L3 不只看自动指标：抽 10 题人工核对引用页码是否真的能翻�
 - 评测集同步为 LangSmith dataset（`id` 作为 example 的外部键）；
 - 每次评测是一次 experiment，逐题写入 feedback（`correctness` / `citation_precision` / `faithfulness`）；
 - 好处：能在 UI 里并排对比两次实验的逐题差异，且 trace 与分数直接关联，定位到具体 span。
+- **trace_id 是怎么来的**：`run_bench --answer` 会给每题套一层 `eval.item` span 当树根
+  （`rag.request` 及其子 span 挂在它下面），把根 run id 记进结果的 `trace_id` 字段；
+  `eval_answer.py` 打完 judge 分数后按这个 id 回写，所以分数能下钻到具体那一次调用。
+- 坑（已修）：脚本不是 FastAPI 入口，没有 lifespan 调 `tracer.configure()`，
+  早期版本因此 `trace_id` 全为空、feedback 回写 0 条——**不报错，只是静悄悄什么都不写**。
 - 约束：LangSmith 关闭时必须能完整跑完评测（结果只写本地报告）——评测流程不许依赖跟踪后端。
+- 验证：`uv run pytest -m live -q`（需 `LANGSMITH_API_KEY`）覆盖 trace 往返、feedback 挂到指定
+  trace、dataset 重复同步幂等；2026-09-30 实跑回写 25 条 feedback，抽查单条 run 读回 3 个分数。
 
 ### 6.4 已落地：`benchmark/` 脚本与 README 基准表
 
