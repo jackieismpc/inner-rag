@@ -71,6 +71,17 @@ class Span:
         """补记运行期才知道的字段（命中数、token 用量、是否被采样）。"""
         self.metadata.update(fields)
 
+    @property
+    def trace_id(self) -> str | None:
+        """LangSmith 的 run id（整棵树的根 id）；未启用追踪时为 None。
+
+        评测要用它把「逐题分数」挂回对应 trace：没有这个 id，feedback 只能堆在
+        实验维度上，无法下钻到某次具体调用（见 docs/evaluation.md 6.3）。
+        """
+        if self.run is None:
+            return None
+        return str(getattr(self.run, "id", "") or "") or None
+
 
 class Tracer:
     """追踪门面：对外只有 `span()` 一个入口，后端（LangSmith / 本地日志）由配置决定。"""
@@ -202,6 +213,21 @@ class Tracer:
     def _upload(self, run: Any) -> None:
         run.post()
         run.patch()
+
+    @property
+    def client(self) -> Any:
+        """LangSmith 客户端（未启用时为 None）；评测用它同步 dataset 与回写分数。"""
+        return self._client if self.enabled else None
+
+    def current_trace_id(self) -> str | None:
+        """当前调用链的根 run id（供评测回写 feedback）；未启用追踪时为 None。"""
+        span = _current_span.get()
+        if span is None:
+            return None
+        root = span
+        while root.parent is not None:
+            root = root.parent
+        return root.trace_id
 
     def _log(self, span: Span) -> None:
         """本地计时日志：LangSmith 开着时它是 DEBUG 冗余，关着时它就是唯一的耗时来源。"""
