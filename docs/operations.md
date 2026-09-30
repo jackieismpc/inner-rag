@@ -164,6 +164,40 @@ bash scripts/llm_status.sh         # 查看状态（进程 / GPU 显存 / 是否
 **回退**：本地服务跑不起来时，把 `.env` 的 `LLM_PROVIDER` 改回 `deepseek` 即可
 （`DEEPSEEK_API_KEY` 仍在 .env 中保留）。
 
+## 3.6 本地 OCR（PaddleOCR）
+
+扫描件 / 图片 / 扫描版 PDF 的文字识别走本地 **PaddleOCR**（`OCR_BACKEND=paddle`），
+不依赖视觉大模型、无网络调用、不按 token 计费。
+
+**安装**（opt-in extra，体积较大）：
+
+```bash
+uv sync --extra ocr-paddle
+# 注意：若同时用本地 embedding（EMBEDDING_PROVIDER=sentence_transformers），
+# 必须两个 extra 一起装，否则 uv 会因依赖解析把 torch 卸掉：
+uv sync --extra local-embed --extra ocr-paddle
+```
+
+首次运行会从官方源下载权重到 `~/.paddlex/official_models/`（约 1GB，含文档方向 / 去畸变 /
+文字检测 / 文字识别四个模型），之后缓存复用。
+
+**一个必踩的坑（已写进 `ocr.py`）**：paddlepaddle 3.3.x 的 oneDNN 后端在 PIR（新 IR）下
+对 `ArrayAttribute<DoubleAttribute>` 未实现，CPU 推理会抛
+`ConvertPirAttribute2RuntimeAttribute not support`（`onednn_instruction.cc`）。
+修复是在 `ocr.py` 模块顶部 `os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "False")`，
+让 run_mode 走纯 paddle 内核。必须在**任何 paddleocr import 之前**设置（paddlex 在 import 期
+读取该开关），所以放在模块顶部而非 `_get_engine` 里。
+
+**验证**：
+
+```bash
+OCR_BACKEND=paddle uv run python scripts/verify_ocr.py
+# 生成一张含「路明非坐在窗边看书」的图片并识别，断言结果包含关键字，退出码 0 即通过
+```
+
+**回退**：`OCR_BACKEND=none`（默认）时图片/扫描件显式报错而不是写入占位文本；paddle
+后端不可用（依赖未装）时 `get_ocr_backend()` 会降级到 `none` 并告警。
+
 ## 4. 部署
 
 

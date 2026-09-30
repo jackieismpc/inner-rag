@@ -107,7 +107,7 @@ flowchart TB
         A3["sqlite / postgresql"]
         A4["memory LRU（+ 预留 redis）"]
         A5["in-process（+ 预留 arq / celery）"]
-        A6["none / paddle / vlm"]
+        A6["none / paddle"]
         A7["loguru + langsmith（+ 预留 OTLP）"]
         A8["本地账号 + session/JWT（单租户）"]
     end
@@ -438,21 +438,21 @@ DoD 对照：
 > 原计划里的「分块策略」放在 8.4 是有意的：先补齐召回与排序这两件可量化的，再动分块——
 > 分块一变，所有历史对照数字都失去可比性，必须放在最后并整体重跑。
 
-### Phase 9 — 文档面扩展与 OCR/VLM
+### Phase 9 — 文档面扩展与本地 OCR（PaddleOCR）✅ 已完成（2026-09-30）
 
-**目标**：扫描件、图片、复杂表格也能进索引，且不引入重型本地依赖。
+**目标**：扫描件、图片、复杂表格也能进索引。OCR 全程使用本地 **PaddleOCR**，不依赖视觉大模型，
+不引入网络调用与按 token 计费的成本。
 
 **主要改动**
-- `services/ocr.py` 增加 `vlm` 后端（走 chat provider 的 OpenAI 兼容接口，传 base64 图片），
-  `OCR_BACKEND=none|paddle|vlm`；
-- 扫描版 PDF：按页渲染 → 降采样 → VLM 识别；失败标记 `failed` 并给出原因；
-- 表格与 Excel 结构化抽取（保留表头语义），作为可选能力；
-- 成本控制：送图前限制分辨率与页数，OCR 步骤的 token 成本进 trace 与指标。
+- 落地 `services/ocr.py` 的 `paddle` 后端，依赖 `uv sync --extra ocr-paddle` 安装；
+  `OCR_BACKEND=none|paddle`；
+- 扫描版 PDF：按页渲染（`OCR_RENDER_DPI`）→ PaddleOCR 识别；失败标记 `failed` 并给出原因；
+- 表格与 Excel 结构化抽取（保留表头语义），作为可选能力。
 
-**阶段测试**：VLM 后端假响应单测（monkeypatch HTTP）；真实 VLM live 用例（一张含已知文字的图片，
-断言识别结果包含该文字）；`none` 后端对图片显式报错的回归用例保持。
+**阶段测试**：`none` 后端对图片显式报错的回归用例保持；`paddle` 后端真实用例（一张含已知文字的
+图片，断言识别结果包含该文字）；PaddleOCR 结果解析（`_extract_rec_texts`）兼容新旧结构。
 
-**DoD**：上传一张扫描件，文档 `completed` 且能检索到图中文字；OCR 步骤在 trace 中可见并有成本字段。
+**DoD**：上传一张扫描件，文档 `completed` 且能检索到图中文字；OCR 后端在启动日志中记录可用性。
 
 ### Phase 10 — 交付：Docker / PostgreSQL / CI / 性能与成本
 
@@ -575,7 +575,7 @@ README 基准表对比：
 | M5 质量提升 | Phase 8 | 小库指标对照表（改动前/后），G3 通过 |
 | M6 交付 | Phase 10 | 干净机器部署记录 + CI 绿 + 成本/延迟数字 |
 
-（Phase 9 OCR/VLM 按需插在 M5 前后，不阻塞主线。）
+（Phase 9 本地 OCR（PaddleOCR）按需插在 M5 前后，不阻塞主线。）
 
 ## 7. 风险登记簿
 
@@ -619,5 +619,5 @@ README 基准表对比：
 | 关系库 | SQLite 优先、PostgreSQL 可达，共用 Alembic | 开发零依赖、部署可扩展；两者行为差异用同一套迁移与测试兜住 |
 | 评测语料 | 龙族真实小说，双库（小库 / 全库）+ 短片段 fixture | 真实语料才能暴露别名与长文检索问题；小库保证可自动回归，版权与体积问题用「不入库原文」规避 |
 | 评测方法 | 指标 + LLM-as-judge + 引用锚点校验 | 纯关键词容易漏判，纯 judge 又会漂移；引用锚点让「答对但没依据」也能被发现 |
-| OCR | 可插拔：`none`（默认）/ `paddle`（本地）/ `vlm`（云端，Phase 9） | 不把重依赖强加给所有部署；只有扫描件场景才付成本 |
+| OCR | 可插拔：`none`（默认）/ `paddle`（本地，Phase 9 落地） | 不把重依赖强加给所有部署；只有扫描件场景才付成本；不用视觉大模型，避免按 token 计费 |
 | 版本与兼容 | 配置项向后兼容；`embedding_key` 变更必须重建索引并提示 | 避免「跨向量空间静默检索」这种最难查的错 |

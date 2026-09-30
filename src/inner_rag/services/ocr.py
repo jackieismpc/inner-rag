@@ -4,13 +4,13 @@
 写入占位文本污染索引。已知实现：
 
 * ``paddle``  —— 本地 PaddleOCR 3.x，需要 ``uv sync --extra ocr-paddle``，
-  模型体积较大且首次运行需下载权重；
-* 视觉大模型（OpenRouter / HuggingFace 等）后端将在 Phase 3 接入。
+  模型体积较大且首次运行需下载权重。
 """
 
 from __future__ import annotations
 
 import io
+import os
 from abc import ABC, abstractmethod
 from typing import Any
 
@@ -18,6 +18,15 @@ from loguru import logger
 from PIL import Image
 
 from inner_rag.core.config import settings
+
+# 必须在任何 paddleocr / paddlex import 之前设置：paddlepaddle 3.3.x 的 oneDNN 后端在
+# PIR（新 IR）下对 ArrayAttribute<DoubleAttribute> 未实现，CPU 推理会抛
+# "ConvertPirAttribute2RuntimeAttribute not support"（onednn_instruction.cc）。
+# paddlex 在 import 期读取该开关（paddlex/utils/flags.py 的 ENABLE_MKLDNN_BYDEFAULT），
+# 默认 True → run_mode=mkldnn 触发 bug；设 False 让 run_mode 走纯 paddle 内核。
+# 放在模块顶部而非 _get_engine 里，因为 is_available() 就会 import paddleocr，
+# 到 _get_engine 再设就太晚了。
+os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "False")
 
 
 class OCRBackend(ABC):

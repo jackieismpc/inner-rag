@@ -45,7 +45,7 @@
 | `AUTH_SECRET_KEY` | `dev-only-insecure-...` | JWT 签名密钥（HS256）；`DEBUG=false` 时用默认值或短于 32 字节会**拒绝启动** |
 | `AUTH_TOKEN_TTL_MINUTES` | `720` | 令牌有效期（分钟）；JWT 无状态、无法单独撤销，短 TTL 是泄漏后的唯一收敛手段 |
 | `ENABLE_DOCS` | `true` | 是否开放 `/docs` `/redoc` `/openapi.json`；生产环境建议关闭 |
-| `OCR_BACKEND` | `none` | `none` 或 `paddle`；关闭时图片/扫描件会明确报错而不是写入占位文本 |
+| `OCR_BACKEND` | `none` | `none` 或 `paddle`；`paddle` 为本地 PaddleOCR（需 `uv sync --extra ocr-paddle`，见 operations.md 3.6）；关闭时图片/扫描件会明确报错而不是写入占位文本 |
 | `ALLOW_LOCAL_IMPORT` | `false` | 是否允许 `import-path`（服务端文件系统读取能力），配合 `LOCAL_IMPORT_ROOT` 限定目录 |
 | `CORS_ORIGINS` | `http://localhost:3000,...` | 前端来源白名单 |
 | `LOG_FORMAT` | `text` | `text`（人读）/ `json`（一行一个 JSON，供采集端解析） |

@@ -175,7 +175,7 @@ api  →  services  →  providers / repositories / plugins / core
 | 关系库 | `repositories/`（`base.py` 契约 + `sqlalchemy.py` 实现 + `build_repositories`）+ Alembic | SQLite（默认）/ PostgreSQL，均走 SQLAlchemy 2.x | `DATABASE_URL` | `lifespan` 里 `check_database()` | `tests/test_repositories.py`、`tests/test_api.py` |
 | 缓存 | `services/cache.py`（`CacheBackend` 契约 + `plugins.cache_backends`） | memory（每 namespace 一份 LRU，可配容量/TTL） | `CACHE_BACKEND`、`QUERY_CACHE_MAX_SIZE`、`QUERY_CACHE_TTL`、`EMBEDDING_CACHE_MAX_SIZE` | `/api/system/stats` 的 `*_cache.stats()`（含命中率） | `tests/test_cache.py`（`BACKEND_FACTORIES` 参数化） |
 | 后台任务 | `services/task_queue.py`（`TaskQueue` 契约 + `plugins.task_queues`） | inprocess（协程池 + 退避重试）、inline（同步执行，测试用） | `TASK_QUEUE_BACKEND`、`TASK_QUEUE_CONCURRENCY`、`TASK_QUEUE_MAX_RETRIES`、`TASK_QUEUE_RETRY_BACKOFF`、`TASK_QUEUE_HISTORY` | `/api/system/stats` 的 `task_queue.summary()` | `tests/test_task_queue.py` |
-| OCR | `services/ocr.py` | none（默认）/ paddle / vlm（Phase 9） | `OCR_BACKEND`、`OCR_LANG` | 启动时记录后端与可用性 | `tests/test_parser.py` |
+| OCR | `services/ocr.py` | none（默认）/ paddle | `OCR_BACKEND`、`OCR_LANG` | 启动时记录后端与可用性 | `tests/test_parser.py` |
 | 追踪 / 指标 | `core/observability.py`（Tracer 门面）+ `core/metrics.py`（注册表）+ `core/logging.py`（日志格式） | loguru + LangSmith（+ 预留 OTLP） | `LANGSMITH_*`、`LOG_FORMAT`、`LOG_SAMPLE_RATE`、`METRICS_BACKEND`、`METRICS_TOKEN`、`APP_ENV` | `/api/system/metrics`（含 tracing 状态） | `tests/test_observability.py` |
 | 评测器 | `services/evaluation.py` | 指标 + LLM-as-judge | 评测集路径、judge 模型 | 报告产出 | `tests/test_benchmark_metrics.py` |
 | 身份 / 权限 | `core/security.py`（策略原语）+ `core/access.py`（ACL，依赖 `ACLReader` 协议）+ `api/deps.py`（HTTP 映射） | 本地账号（argon2id 口令哈希）+ JWT（HS256）；知识库级 ACL：`owner` / 成员 `read` / 成员 `write` | `AUTH_SECRET_KEY`、`AUTH_TOKEN_TTL_MINUTES`、`ENABLE_DOCS` | `/api/system/health` 免鉴权（白名单另有 `/api/auth/login`） | `tests/test_auth.py` |
@@ -535,11 +535,11 @@ class TaskQueue(Protocol):
 
 ### 3.6 OCR
 
-`OCR_BACKEND=none|paddle|vlm`：
+`OCR_BACKEND=none|paddle`：
 
 - `none`：遇到图片 / 扫描件**显式失败**并说明如何开启，不许静默丢内容；
-- `paddle`：本地推理，重依赖，按 extra 安装；
-- `vlm`（Phase 9）：走 OpenAI 兼容接口传 base64 图片，成本进 trace。
+- `paddle`：本地 PaddleOCR 推理，重依赖，按 `uv sync --extra ocr-paddle` 安装；
+  无需网络、无需视觉大模型，是本地 OCR 的默认落地方案。
 
 ### 3.7 追踪与指标（Phase 5 已交付）
 

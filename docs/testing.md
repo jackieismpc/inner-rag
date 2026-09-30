@@ -153,7 +153,7 @@ tests/
   与列表隔离），`anonymous_client` 不带 Token。账号走与 `scripts/create_user.py` 同一条代码路径创建
   ——系统没有注册接口，测试也不该绕过鉴权塞数据；
 - **假时钟 / 假网络**：需要 TTL 的缓存用例用 monkeypatch 时间，不用 `sleep`；
-  任何 HTTP 调用（Phase 5 的 tracing 上报、Phase 9 的 VLM）都要能 monkeypatch——
+  任何 HTTP 调用（Phase 5 的 tracing 上报、任何云端 provider）都要能 monkeypatch——
   `tests/test_observability.py` 就是把 `httpx` 的两个 transport 换成「一调用即抛」来断言零网络的；
 - **严禁真实 Key**：测试进程里不许出现真实 Key；`live` 用例从环境变量读，缺失时 `skip`
   并给出「缺少 X_API_KEY」的明确原因。

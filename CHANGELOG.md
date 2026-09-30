@@ -23,6 +23,27 @@
 - **效果**必须能被复现或引用（跑过的命令、通过的用例数、评测指标、trace 链接等）。
 ---
 
+## [Phase 9] 2026-09-30 — 本地 OCR（PaddleOCR）落地
+
+- 类型：新增功能 + 文档
+- 目的：让扫描件 / 图片 / 扫描版 PDF 也能进索引并被检索到。OCR 全程使用本地 PaddleOCR，
+  不依赖视觉大模型、无网络调用、不按 token 计费（对比原计划里走 chat provider 的 vlm 方案，
+  本地主模型 Qwen2.5-32B-Instruct 是纯文本模型、不支持视觉，故放弃 vlm）。
+- 方案：
+  - 落地 `services/ocr.py` 的 `paddle` 后端（`OCR_BACKEND=none|paddle`），
+    依赖 `uv sync --extra ocr-paddle`（paddleocr 3.7.0 + paddlepaddle 3.3.1）；
+  - 扫描版 PDF 按页渲染（`OCR_RENDER_DPI`）→ PaddleOCR 识别；
+  - 修掉一个必踩的坑：paddlepaddle 3.3.x 的 oneDNN 后端在 PIR 下对
+    `ArrayAttribute<DoubleAttribute>` 未实现，CPU 推理崩（`onednn_instruction.cc`）。
+    解法是在 `ocr.py` 模块顶部 `os.environ.setdefault("PADDLE_PDX_ENABLE_MKLDNN_BYDEFAULT", "False")`
+    让 run_mode 走纯 paddle 内核；必须放在任何 paddleocr import 之前（paddlex 在 import 期读该开关）。
+- 效果：
+  - `scripts/verify_ocr.py` 生成含「路明非坐在窗边看书」的图片，`OCR_BACKEND=paddle` 实跑识别
+    结果逐字正确，退出码 0；
+  - 新增 `tests/test_ocr.py`（6 例：结果解析新旧结构兼容、mkldnn 开关、is_available 降级），
+    离线全量 375 passed / 1 skipped；mypy 59 文件无问题、ruff 全过、g0 门禁通过。
+- 涉及提交：见本阶段提交
+
 ## [Phase 8.4 收尾 + 本地 LLM] 2026-09-30 — 检索调优结论落地、rerank 默认开启、本地 Qwen2.5-32B 部署
 
 - 类型：优化 + 新增功能
