@@ -164,7 +164,7 @@ VLLM_BASE_URL=http://127.0.0.1:8000/v1
 VLLM_CHAT_MODEL=/data/users/mapengcheng/rustproject/qwen25-32b-gptq
 ```
 
-启动 / 关闭用仓库脚本（`scripts/llm_start.sh` / `scripts/llm_stop.sh`），
+启动 / 关闭 / 重启 / 状态用仓库脚本（`scripts/llm_start.sh` / `llm_stop.sh` / `llm_restart.sh` / `llm_status.sh`），
 关键参数（`gptq_marlin` 量化、triton attention、nohup env 选卡）见 `docs/operations.md` 3.5。
 本地服务跑不起来时，把 `LLM_PROVIDER` 改回 `deepseek` 即回退。
 

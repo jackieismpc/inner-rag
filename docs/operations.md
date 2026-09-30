@@ -131,10 +131,14 @@ uv run alembic downgrade -1                           # 回退一步
 跑在服务器现有的 `sglang` conda 环境上，走 OpenAI 兼容接口。启动/关闭用仓库内脚本：
 
 ```bash
-bash scripts/llm_start.sh          # 启动（默认 GPU 2，可传 GPU_ID 覆盖）
+bash scripts/llm_start.sh          # 启动（默认 GPU 2，可传 GPU_ID 覆盖；启动后自动等待就绪）
 bash scripts/llm_stop.sh           # 关闭
-curl http://127.0.0.1:8000/health  # 探测是否就绪（返回 200）
+bash scripts/llm_restart.sh        # 一键重启（先关后启，自动等待就绪）
+bash scripts/llm_status.sh         # 查看状态（进程 / GPU 显存 / 是否就绪）
 ```
+
+`llm_start.sh` 会在启动后轮询 `http://127.0.0.1:8000/health`（最长 300s），就绪即打印
+`✅ 服务已就绪`；若进程提前退出则打印日志尾部并报错退出。幂等：已在运行时再跑会直接返回。
 
 **模型与权重**：`~/rustproject/qwen25-32b-gptq`（19GB，GPTQ Int4，5 个 safetensors 分片），
 由 `modelscope download --model Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4 --local_dir ./qwen25-32b-gptq`
