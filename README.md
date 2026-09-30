@@ -24,8 +24,10 @@
   离线 mock），只改 `.env`；provider 名写错或漏填 Key 时得到「该去 .env 改哪个变量」的明确提示（503）
 - **性能与成本控制**：Embedding 缓存（按 `provider:model` 隔离）+ 检索缓存（LRU + TTL，按库精确失效）、
   批量嵌入 + 信号量限流、模型实例在工厂内复用
-- **可观测与工程化**：检索 / Prompt 日志与缓存命中率、空召回率、延迟统计；uv 锁依赖、Alembic 迁移、
-  生产环境拒绝用默认 / 过短的 JWT 密钥启动、ruff + mypy、139 个离线 pytest 用例（另 5 个联网验收）、
+- **可观测与工程化**：每个请求一个 `request_id`（贯穿响应头、日志与 trace）；检索 / 问答 / 入库全链路
+  span 计时，可选上报 LangSmith（默认关闭，零网络零费用）；`LOG_FORMAT=json` 一行一 JSON；
+  `GET /api/system/metrics` 输出延迟分位、空召回、缓存命中与 token 用量；uv 锁依赖、Alembic 迁移、
+  生产环境拒绝用默认 / 过短的 JWT 密钥启动、ruff + mypy、149 个离线 pytest 用例（另 5 个联网验收）、
   Dockerfile + docker compose
 
 ## 架构
@@ -282,9 +284,37 @@ TOKEN=$(curl -s -X POST localhost:8010/api/auth/login \
 | `OCR_BACKEND` | `none` | `none` 或 `paddle`；关闭时图片/扫描件会明确报错而不是写入占位文本 |
 | `ALLOW_LOCAL_IMPORT` | `false` | 是否允许 `import-path`（服务端文件系统读取能力），配合 `LOCAL_IMPORT_ROOT` 限定目录 |
 | `CORS_ORIGINS` | `http://localhost:3000,...` | 前端来源白名单 |
+| `LOG_FORMAT` | `text` | `text`（人读）/ `json`（一行一个 JSON，供采集端解析） |
+| `LANGSMITH_TRACING` | `false` | LangSmith 追踪总开关，**默认关闭**；关闭时 span 照常计时并落本地日志 |
+| `LANGSMITH_API_KEY` / `LANGSMITH_PROJECT` | 空 / `inner-rag` | 追踪上报的目标；Key 为空时只降级告警，不影响请求 |
+| `METRICS_BACKEND` / `METRICS_TOKEN` | `none` / 空 | `/api/system/metrics` 的输出格式与可选门禁（非空时需 `X-Metrics-Token`） |
 
 其余项（各 provider 模型名、top_k、缓存大小、日志开关等）都在 `.env.example` 里有逐项注释；
 其中「换 embedding 模型 = 换向量空间」需要重建索引。
+
+## 可观测性（追踪 / 日志 / 指标）
+
+排障统一入口：**拿 `request_id` 串日志 → 拿 `session_id`（即会话 ID）找 LangSmith thread →
+在 trace 里定位最慢的 span**。
+
+- **request_id**：每个请求生成或透传 `X-Request-ID`，同时写进响应头、每条日志与每个 span；
+  文本日志里是 `rid=`，`LOG_FORMAT=json` 时每行一个 JSON 对象。
+- **span 树**：一次问答是
+  `rag.request → retrieve → (cache.query | vector.search → embed.query) → prompt.build → llm.generate`；
+  一次文档入库是 `ingest.document → parse / vector.ingest`（`embed.documents` 嵌在 `vector.ingest` 里）。
+- **追踪后端**：`LANGSMITH_TRACING=true` + `LANGSMITH_API_KEY` 后上报到 LangSmith（项目 `LANGSMITH_PROJECT`）。
+  默认关闭；Key 缺失、初始化失败或上报失败都只降级为本地计时日志并计入 `tracing_errors_total`，
+  **绝不影响请求成功率**。
+- **指标**：`GET /api/system/metrics`（JSON 或 Prometheus 文本）覆盖请求数与延迟分位、检索耗时、
+  空召回与阈值过滤数、缓存命中、token 用量、首 token 延迟、入库成功 / 失败数。
+
+两个必须知道的边界：
+
+1. 指标是**进程内累计**（单 worker 语义）：多副本部署时每个副本各记一份，看板要按实例聚合；
+2. **成本指标（`rag_llm_cost_usd_total`）尚未提供**——token 单价属于计费域，等 Phase 10 与成本看板
+   一起定，不在代码里写没有来源的价格表。
+
+细节见 `docs/observability.md`。
 
 ## 目录结构
 
@@ -297,7 +327,7 @@ inner-rag/
 ├── migrations/               # Alembic 迁移（env.py + versions/）
 ├── src/inner_rag/
 │   ├── main.py               # FastAPI 应用入口（CORS、异常处理、路由注册）
-│   ├── core/                 # 配置、数据库引擎与会话、安全原语（argon2id / JWT）、ACL 判定、身份上下文
+│   ├── core/                 # 配置、数据库引擎与会话、安全原语（argon2id / JWT）、ACL 判定、身份与请求上下文、日志格式（text/json）、追踪门面、指标注册表
 │   ├── models/               # SQLAlchemy 2.0 ORM 模型（含 user / kb_member）
 │   ├── schemas/              # Pydantic 请求/响应模型
 │   ├── api/                  # 路由：auth / kb / document / chat / system + 鉴权依赖（deps.py）
@@ -344,6 +374,7 @@ inner-rag/
 | GET | `/api/system/health` | 健康检查（后端 + Chat/Embedding provider 连通性与错误原因） |
 | GET | `/api/system/providers` | 全部可用 provider、当前选择、key 是否已配置（不返回密钥） |
 | GET | `/api/system/stats` | 检索统计 + 缓存状态 |
+| GET | `/api/system/metrics` | 进程内指标（延迟分位、检索 / 缓存 / token / 入库）+ 追踪状态；**免登录**，配 `METRICS_TOKEN` 时需 `X-Metrics-Token` |
 | GET | `/api/system/config` | 前端可用的非敏感运行时配置 |
 | GET | `/api/system/models` | 当前 provider 的可用模型列表（Ollama / 云端 `/models`） |
 | POST | `/api/system/cache/clear?kb_id=` | 手动清理缓存（指定知识库或全清） |

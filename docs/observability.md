@@ -3,8 +3,11 @@
 对应 `docs/DEVELOPMENT_PLAN.md` 的 **Phase 5**。目标是：一次问答的每一步都能被**计时、归因、回放**，
 线上排障从「翻日志猜」变成「看 trace 定位」。
 
-现状：loguru 同时写 stdout 与 `LOG_DIR/app.log`，检索日志与 Prompt 统计落在
-`services/retrieval_log.py`（`/api/system/stats` 可查）；没有 request_id、没有结构化字段、没有跨步骤 trace。
+**已交付（as-built）**：`core/logging.py` 提供 text / json 两种 sink 与 request_id 中间件；
+`core/observability.py` 提供 Tracer 门面与 span 树；`core/metrics.py` 是进程内指标注册表，
+由 `GET /api/system/metrics` 对外暴露。检索日志与 Prompt 统计仍落在 `services/retrieval_log.py`
+（`/api/system/stats` 可查），两者职责不同：`stats` 是「命中率这类业务统计」，`metrics` 是
+「延迟与用量这类运行指标」。
 
 ## 1. 配置项
 
@@ -17,6 +20,7 @@
 | `LOG_RETRIEVAL` | `true` | 是否记录检索明细 |
 | `LOG_PROMPT` | `true` | 是否记录 Prompt 内容；**生产建议 `false`** |
 | `APP_VERSION` | `0.3.0` | 写进 trace 与日志，便于按版本对比指标 |
+| `APP_ENV` | `dev` | `dev|staging|prod`，写进日志与 span metadata，用于按环境对比指标 |
 
 ### 1.2 新增（Phase 5）
 
@@ -36,27 +40,30 @@
 
 ### 2.1 trace 树
 
-一次 `POST /api/chat/send` 或 `/api/chat/stream` 产生：
+一次 `POST /api/chat/send` 或 `/api/chat/stream` 产生（as-built）：
 
 ```
-rag.request                         # 顶层：请求级（含 request_id、会话、kb）
-├── retrieve                        # 检索阶段
-│   ├── cache.query                 # 查询缓存（命中则跳过后面两步）
-│   ├── embed.query                 # 查询向量化
-│   └── vector.search               # 向量检索（含 strategy、k、阈值、空召回）
-├── prompt.build                    # Prompt 组装（分块数、总字符数、来源清单）
-└── llm.generate                    # 模型调用（token 用量、首 token 延迟、结束原因）
+rag.request                         # 顶层：请求级（含 request_id、user_id、session_id=conv_id、kb_id）
+├── retrieve                        # 检索阶段（embedding_identity、strategy、k）
+│   ├── cache.query                 # 查询缓存（命中则跳过 vector.search）
+│   └── vector.search               # 向量检索（hits、filtered_out、top_score）
+│       └── embed.query             # 查询向量化（由 services/embedding.py 自埋，天然嵌在检索内）
+├── prompt.build                    # Prompt 组装（chunk_count、context_chars）
+└── llm.generate                    # 模型调用（token 用量；流式另记 ttfb_ms）
 ```
 
 文档入库链路（后台任务）单独一棵树：
 
 ```
-ingest.document
-├── parse                           # 文本抽取（含 OCR 后端与页数）
-├── chunk                           # 分块（chunk 数、平均长度）
-├── embed.documents                 # 批量嵌入（batch 数、缓存命中率）
-└── vector.write                    # 写入向量库（batch 数、耗时）
+ingest.document                     # 顶层（kb_id、doc_id、filename、ocr_backend）
+├── parse                           # 文本抽取 + 分块（chunk_count、chars）
+└── vector.ingest                   # 写向量库
+    └── embed.documents             # 批量嵌入（count、cache_hits、batch_count）
 ```
+
+**为什么入库没有单独的 `chunk` / `vector.write`**：分块发生在 `services/parser.py` 内部、嵌入与写库
+同一个 `VectorStore.add_documents` 调用里，拆开它们要改 `VectorStore` 契约（并让 chroma 一起改）。
+先如实记到「能记的粒度」，等 Phase 7 做插件点深化时再拆。
 
 ### 2.2 metadata 与 tags 约定
 
@@ -76,7 +83,12 @@ ingest.document
 | `chunk_count` / `context_chars` | 整数 | Prompt 膨胀诊断 |
 | `prompt_tokens` / `completion_tokens` | 整数 | 成本核算 |
 
-tags：`["env:<env>", "provider:<provider>", "kind:chat|ingest|eval"]`。
+tags：`["env:<env>", "version:<app_version>"]`；链路类型（问答 / 入库 / 评测）放在 metadata 的
+`kind` 上（`chat|ingest|eval`）——标签在 LangSmith 里是筛选维度，而 `kind` 与 `kb_id` 这类
+业务维度一起看才有意义，放在 metadata 里更利于按值聚合。
+
+LangSmith 开着时，span 的计时日志降到 DEBUG（trace 里有耗时）；关掉时降到 INFO——
+那时本地日志是唯一的耗时来源，这正是「降级为本地计时日志」的含义。
 
 ### 2.3 采样、脱敏与降级
 
@@ -140,7 +152,7 @@ tags：`["env:<env>", "provider:<provider>", "kind:chat|ingest|eval"]`。
 | `rag_retrieve_filtered_total` | counter | 被阈值滤掉的条数 |
 | `rag_cache_hits_total{namespace}` | counter | query / embedding 缓存命中 |
 | `rag_llm_tokens_total{provider,type}` | counter | prompt / completion token |
-| `rag_llm_cost_usd_total{provider,model}` | counter | 估算成本（价格表进配置） |
+| ~~`rag_llm_cost_usd_total{provider,model}`~~ | counter | **本阶段不提供**：token 单价属于计费域，写死一张没有来源的价格表只会给出「看起来权威、实际是错」的数字；与成本看板一起放到 Phase 10 |
 | `rag_ingest_documents_total{status}` | counter | 入库成功/失败 |
 | `tracing_errors_total` | counter | 追踪上报失败次数 |
 
@@ -164,11 +176,15 @@ tags：`["env:<env>", "provider:<provider>", "kind:chat|ingest|eval"]`。
 
 排障统一入口：**拿 `request_id` 串日志 → 拿 `session_id` 找 LangSmith thread → 在 trace 里定位最慢的 span**。
 
-## 6. Phase 5 完成定义（DoD）
+## 6. Phase 5 完成定义（DoD）与验证结果
 
-1. `/api/chat/send` 在 LangSmith 能看到完整 trace：`retrieve` 与 `llm.generate` 两个子 run，
-   含耗时、token 用量、metadata；
-2. 同一次请求的 stdout 日志能用 `request_id` 全部串起来，`LOG_FORMAT=json` 时每行都能 `json.loads`；
-3. `LANGSMITH_TRACING=false`（默认）时**零网络调用**，且有离线测试断言；
-4. 追踪上报失败不影响接口成功率（有测试：注入一个必然失败的 tracer，断言请求仍 200）；
-5. `.env.example`、README「可观测性」小节、本文件三者一致。
+| # | DoD | 验证方式 | 结论 |
+| --- | --- | --- | --- |
+| 1 | `/api/chat/send` 在 LangSmith 能看到完整 trace：`retrieve` 与 `llm.generate` 两个子 run，含耗时、token 用量、metadata | 真实链路（G2，需 `LANGSMITH_API_KEY`）；离线侧由 `test_span_tree_nests_chat_steps` 断言 span 父子层级正确 | 离线侧✅；真实上报待 G2 执行（无 Key 时不阻塞交付） |
+| 2 | 同一次请求的日志能用 `request_id` 串起来，`LOG_FORMAT=json` 时每行都能 `json.loads` | `test_json_log_lines_are_parseable`、`test_request_id_matches_between_response_and_logs`、`test_request_id_is_passed_through` | ✅ |
+| 3 | `LANGSMITH_TRACING=false`（默认）时零网络调用 | `test_no_network_when_tracing_disabled`：monkeypatch `httpx` 的两个 transport 为「一调用即抛」，跑完整问答仍 200 | ✅ |
+| 4 | 追踪上报失败不影响接口成功率 | `test_tracing_upload_failure_does_not_break_request`：注入必然失败的 `_upload`，断言请求 200 且 `tracing_errors_total` 计数 | ✅ |
+| 5 | `.env.example`、README「可观测性」小节、本文件三者一致 | 人工核对三处配置项与指标清单 | ✅ |
+
+未做（明确留到后续阶段）：成本指标（Phase 10）、入库链路拆到 `chunk` / `vector.write`（Phase 7）、
+Prometheus 远程写 / OTLP 导出（Phase 10）。

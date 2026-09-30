@@ -68,7 +68,7 @@ api  →  services  →  providers / core
 | 缓存 | `services/cache.py` | 进程内 LRU（query + embedding 两套） | `CACHE_*`、`EMBEDDING_CACHE_SIZE` | 无（进程内） | `tests/test_cache.py` |
 | 后台任务 | FastAPI `BackgroundTasks` | 进程内 | — | 文档状态机可观测 | `tests/test_api.py` |
 | OCR | `services/ocr.py` | none（默认）/ paddle / vlm（Phase 9） | `OCR_BACKEND`、`OCR_LANG` | 启动时记录后端与可用性 | `tests/test_parser.py` |
-| 追踪 / 指标 | `core/observability.py`（Phase 5 新增） | loguru + LangSmith（+ 预留 OTLP） | `LANGSMITH_*`、`LOG_FORMAT`、`METRICS_BACKEND` | `/api/system/metrics` | Phase 5 新增 |
+| 追踪 / 指标 | `core/observability.py`（Tracer 门面）+ `core/metrics.py`（注册表）+ `core/logging.py`（日志格式） | loguru + LangSmith（+ 预留 OTLP） | `LANGSMITH_*`、`LOG_FORMAT`、`LOG_SAMPLE_RATE`、`METRICS_BACKEND`、`METRICS_TOKEN`、`APP_ENV` | `/api/system/metrics`（含 tracing 状态） | `tests/test_observability.py` |
 | 评测器 | `services/evaluation.py`（Phase 6 新增） | 指标 + LLM-as-judge | 评测集路径、judge 模型 | 报告产出 | Phase 6 新增 |
 | 身份 / 权限 | `core/security.py`（策略原语）+ `core/access.py`（ACL）+ `api/deps.py`（HTTP 映射） | 本地账号（argon2id 口令哈希）+ JWT（HS256）；知识库级 ACL：`owner` / 成员 `read` / 成员 `write` | `AUTH_SECRET_KEY`、`AUTH_TOKEN_TTL_MINUTES`、`ENABLE_DOCS` | `/api/system/health` 免鉴权（白名单另有 `/api/auth/login`） | `tests/test_auth.py` |
 
@@ -234,10 +234,20 @@ class TaskQueue(Protocol):
 - `paddle`：本地推理，重依赖，按 extra 安装；
 - `vlm`（Phase 9）：走 OpenAI 兼容接口传 base64 图片，成本进 trace。
 
-### 3.7 追踪与指标（Phase 5）
+### 3.7 追踪与指标（Phase 5 已交付）
 
-`core/observability.py` 暴露 `Tracer` 门面；LangSmith 不可用时降级为本地计时日志。
-细节（trace 树、metadata 约定、日志 schema、指标）见 `docs/observability.md`。
+- `core/observability.py` 暴露 `Tracer` 门面：对外只有 `tracer.span(name, **metadata)` 一个入口，
+  span 树靠 contextvar 串成父子关系，调用方不用传 parent。
+- **降级链**：`LANGSMITH_TRACING=false`（默认）→ 只本地计时日志；
+  开了但 Key 缺失 / Client 初始化失败 → 一行 WARNING + 同样降级；
+  运行中上报失败 → 丢弃该 span 并计 `tracing_errors_total`，**绝不抛给请求**。
+- **采样**：`LOG_SAMPLE_RATE` 只在根 span 判定（半棵树的 trace 没法排障）；失败请求 100% 记录。
+- **脱敏**：trace 只记元数据与统计（条数、长度、耗时、token），不记 Prompt 与回答正文。
+- `core/metrics.py` 是进程内注册表（counter + 有界蓄水池直方图），
+  `METRICS_BACKEND=prometheus` 时导出 summary 格式的文本；多副本部署时各记一份（已知边界）。
+- 契约测试：`tests/test_observability.py`（零网络、上报失败不影响请求、request_id 串联、
+  JSON 可解析、span 层级、指标与 Prometheus 导出）。
+- 细节（trace 树、metadata 约定、日志 schema、指标清单）见 `docs/observability.md`。
 
 ### 3.8 身份与访问控制
 

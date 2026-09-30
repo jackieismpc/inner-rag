@@ -23,7 +23,7 @@
 - `markers` 已注册 `live`；`live` 用例必须显式 `-m live` 才执行；
 - `tests/conftest.py` 强制把 `LLM_PROVIDER` / `EMBEDDING_PROVIDER` 钉成 `mock` 并设置
   `EMBEDDING_MAX_INPUT_CHARS`，保证**不受开发者本机 `.env` 影响**；
-- 用例数快照：**139 个离线用例**（Phase 4 后），其中登录 / 鉴权 / ACL 在 `tests/test_auth.py`
+- 用例数快照：**149 个离线用例**（Phase 5 后），其中登录 / 鉴权 / ACL 在 `tests/test_auth.py`
   （多为参数化路由表，例如「11 条受保护路由全部 401」是一条用例的参数化而不是 11 条用例）；
   向量库契约在 `tests/test_vector_store.py`（`store` fixture 参数化跑 zvec / chroma，同一份用例覆盖两个实现）；
 - 测试库与向量库都用临时目录，不写 `./data`；跑完即清理；
@@ -42,6 +42,7 @@ tests/
 ├── test_providers.py        # L1：spec 解析、错误文案、健康检查状态机
 ├── test_vector_store.py     # L1/L2：写入、检索策略、阈值、相关度换算（参数化跑 zvec / chroma）
 ├── test_benchmark_metrics.py # L1/L4：基准指标算法、评测集 schema 与锚点校验
+├── test_observability.py    # L1/L2：request_id、结构化日志、span 树、指标与 Prometheus 导出
 ├── test_live_providers.py   # L3：真实联网（-m live）
 └── contracts/               # Phase 7：插件点契约测试（参数化跑所有实现）
 ```
@@ -69,7 +70,8 @@ tests/
   与列表隔离），`anonymous_client` 不带 Token。账号走与 `scripts/create_user.py` 同一条代码路径创建
   ——系统没有注册接口，测试也不该绕过鉴权塞数据；
 - **假时钟 / 假网络**：需要 TTL 的缓存用例用 monkeypatch 时间，不用 `sleep`；
-  任何 HTTP 调用（Phase 5 的 tracing 上报、Phase 9 的 VLM）都要能 monkeypatch；
+  任何 HTTP 调用（Phase 5 的 tracing 上报、Phase 9 的 VLM）都要能 monkeypatch——
+  `tests/test_observability.py` 就是把 `httpx` 的两个 transport 换成「一调用即抛」来断言零网络的；
 - **严禁真实 Key**：测试进程里不许出现真实 Key；`live` 用例从环境变量读，缺失时 `skip`
   并给出「缺少 X_API_KEY」的明确原因。
 

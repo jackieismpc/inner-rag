@@ -61,8 +61,8 @@
 | 关系库 | SQLAlchemy 2.1 + Alembic；SQLite（开发默认，WAL + 外键 + 等锁超时）与 PostgreSQL 共用一套迁移 | 服务层直接写 ORM/会话，没有 repository 边界；无 MySQL 等第三方方言验证 |
 | 缓存 | 进程内 LRU（query cache 按 kb 精确失效 + embedding cache 按 `provider:model` 隔离） | 多 worker 下失效；没有 Redis 等外部后端 |
 | 后台任务 | FastAPI `BackgroundTasks` 解析入库 | 无队列、无重试、无进度、无并发上限 |
-| 可观测 | loguru 文本日志（`logs/app.log`）、检索日志与 Prompt 统计（`/api/system/stats`） | 无 request_id、无结构化字段、无 tracing、无指标端点；跨步骤耗时无法归因 |
-| 测试 | 139 个离线用例（含 `tests/test_auth.py` 的身份 / ACL 用例、`tests/test_vector_store.py` 的参数化契约用例与 `benchmark/` 的 15 个指标单测）+ 5 个 `-m live` 联网用例；离线用例强制 mock provider | 无 LLM-as-judge、无真实小库基线；`docs/samples/acceptance.txt` 只验证链路通不通 |
+| 可观测 | request_id 贯穿响应头 / 日志 / trace；text 与 json 两种日志格式；问答与入库全链路 span 计时；LangSmith 追踪（默认关闭、可降级）；`GET /api/system/metrics`（延迟分位、空召回、缓存命中、token、入库结果） | 指标是进程内累计（多副本要按实例聚合）；成本指标待 Phase 10；真实 LangSmith trace 待 G2 验收 |
+| 测试 | 149 个离线用例（含 `tests/test_auth.py` 的身份 / ACL 用例、`tests/test_vector_store.py` 的参数化契约用例、`tests/test_observability.py` 的可观测性用例与 `benchmark/` 的 15 个指标单测）+ 5 个 `-m live` 联网用例；离线用例强制 mock provider | 无 LLM-as-judge、无真实小库基线；`docs/samples/acceptance.txt` 只验证链路通不通 |
 | 评测 | 评测集、离线 fixture、基准脚本已入库（`docs/datasets/dragon_king/`、`benchmark/`） | 真实小库/全库评测依赖本地 PDF 与 provider Key，尚未跑出正式基线 |
 | 交付 | Dockerfile + compose（PostgreSQL 16 / 后端镜像）、Alembic、README | 镜像与 PG 路径未实测；无 CI |
 
@@ -189,12 +189,41 @@ flowchart TB
 **明确不做**：不写 LangChain 集成层、不做格式转换 / 双写 / 灰度切换、不做远程向量服务化、
 不在本阶段加 `page_start` / `page_end`（留给 Phase 6）。
 
-### Phase 5 — 可观测性：LangSmith 追踪 + 运行日志 + 指标（原 Phase 3）
+### Phase 5 — 可观测性：LangSmith 追踪 + 运行日志 + 指标（原 Phase 3）| ✅ 已完成
 
 **目标**：一次问答的每一步（检索/嵌入/组装/生成）都能被计时、归因、回放；线上排障从「看日志猜」
 变成「看 trace 定位」。
 
-**主要改动**
+**实际交付**（as-built；契约与实现细节见 `docs/observability.md`、`docs/architecture.md` 3.7）
+- 追踪门面 `core/observability.py`：`tracer.span(name, **metadata)` 是唯一入口，span 树用 contextvar
+  串父子；LangSmith 是**可选 sink**（`LANGSMITH_TRACING` 默认 false，测试与 CI 零网络零费用）；
+  未配 Key / Client 初始化失败 / 上报失败一律降级为本地计时日志并计 `tracing_errors_total`，
+  **不影响请求**；采样只在根 span 判定，失败请求 100% 记录；trace 只记元数据与统计，不记正文。
+- 日志 `core/logging.py`：`RequestIdMiddleware`（透传或生成 `X-Request-ID`、回写响应头、发访问日志
+  并记请求指标）；`LOG_FORMAT=text|json` 两种 sink，结构化字段走 `logger.bind(event=..., ...)`，
+  text 模式人读不变、json 模式一行一个 JSON。
+- 指标 `core/metrics.py`：counter + 有界蓄水池直方图（p50/p95/p99），`GET /api/system/metrics`
+  输出 JSON 或 Prometheus 文本（`METRICS_BACKEND`），`METRICS_TOKEN` 非空时用 `compare_digest` 校验。
+- 埋点：问答 `rag.request → retrieve → (cache.query | vector.search → embed.query) → prompt.build →
+  llm.generate`；入库 `ingest.document → parse / vector.ingest（含 embed.documents）`。
+  为拿到 token 用量，模型调用从「一条链 `ainvoke` 出字符串」改成「渲染消息 → `ainvoke` 拿 AIMessage →
+  `StrOutputParser` 取文本」。
+- 追踪状态写进启动日志与 `/api/system/metrics`；`session_id=conv_id` 让多轮问答在 LangSmith 里
+  归到同一个 thread（为此 `RAGService.chat/chat_stream` 增加 `conv_id` 参数）。
+
+**阶段测试**：`tests/test_observability.py`（10 条）——默认本地后端、关闭时零网络、
+上报失败仍 200 且计数、JSON 可解析、request_id 响应头 / 日志 / 透传一致、span 父子层级、
+`/metrics` 指标与 token 门禁、Prometheus 导出格式。
+
+**DoD（已验证）**：见 `docs/observability.md` 第 6 节表格。验证方式：`./scripts/gates.sh g1` 全绿
+（ruff / mypy 48 文件 / 149 离线用例 / 迁移 upgrade→check→downgrade→upgrade / 冒烟探活 + openapi /
+changelog 与密钥自检）。
+
+**明确不做**：成本指标（价格表属计费域，Phase 10）、入库链路拆到 `chunk` / `vector.write`
+（会改 `VectorStore` 契约，Phase 7）、Prometheus 远程写与 OTLP（Phase 10）、
+真实 LangSmith 上报的 G2 验收（无 Key 时不阻塞）。
+
+**原计划改动**（供对照，细节以上面的 as-built 为准）
 - 新增 `src/inner_rag/core/observability.py`（Tracer 插件点）：
   - 环境变量驱动接入 LangSmith（`LANGSMITH_TRACING` / `LANGSMITH_API_KEY` / `LANGSMITH_PROJECT` /
     `LANGSMITH_ENDPOINT` / `LANGSMITH_WORKSPACE_ID`），**默认关闭**；
@@ -424,7 +453,7 @@ README 基准表对比：
 | --- | --- | --- |
 | M0 权限 | Phase 3 ✅ | 两个用户互相看不到对方知识库；跨库 403、未登录 401 的用例（`tests/test_auth.py`） |
 | M1 向量库统一 | Phase 4 ✅ | `VECTOR_STORE=zvec` 跑通全链路 + 契约测试参数化跑两后端全绿 + `--mode fixtures` 两后端指标一致（见 Phase 4 DoD） |
-| M2 可观测 | Phase 5 | LangSmith trace 链接 + 一次请求的 request_id 日志串联 + `metrics` 输出 |
+| M2 可观测 | Phase 5 ✅ | request_id 日志串联（响应头 + 日志 + span）+ `metrics` 输出 + span 树层级；LangSmith trace 链接待 G2（需 Key） |
 | M3 可评估 | Phase 6 | `docs/reports/eval-*.md` 报告 + 基线表 + 评测脚本离线单测 |
 | M4 可插拔 | Phase 7 | provider / 关系库 / 缓存 / 队列的契约测试 CI 记录 + 扩展指南与演练记录 |
 | M5 质量提升 | Phase 8 | 小库指标对照表（改动前/后），G3 通过 |
