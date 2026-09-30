@@ -51,6 +51,8 @@ dependencies = [
   "httpx>=0.28.1",
   "loguru>=0.7.3",
   "langchain-deepseek>=1.1.1",
+  # 追踪后端（Phase 5）：默认关闭，未配 Key 时不产生任何网络调用
+  "langsmith>=0.14.1",
 ]
 
 [project.optional-dependencies]

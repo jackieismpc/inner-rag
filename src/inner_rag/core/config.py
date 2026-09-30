@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     # ── Application ────────────────────────────────────────────────────
     APP_NAME: str = "inner-rag Knowledge Base"
     APP_VERSION: str = "0.3.0"
+    # 写进每条日志与每个 span 的 metadata，用于「按环境 / 按版本对比指标」
+    APP_ENV: str = "dev"  # dev | staging | prod
     DEBUG: bool = True
     # /docs /redoc /openapi.json：只在非生产环境开放，避免对外暴露完整接口清单
     ENABLE_DOCS: bool = True
@@ -143,6 +145,26 @@ class Settings(BaseSettings):
     LOG_RETRIEVAL: bool = True
     LOG_PROMPT: bool = True
     LOG_LEVEL: str = "INFO"
+    # text（人读）| json（一行一个 JSON，供采集端解析）
+    LOG_FORMAT: str = "text"
+    # 成功请求的 trace 采样率；失败请求恒为 100%（失败样本才是排障依据）
+    LOG_SAMPLE_RATE: float = 1.0
+
+    # ── Tracing（LangSmith）────────────────────────────────────────────
+    # 默认关闭：测试与 CI 必须零网络、零费用。关掉时 span 只落本地计时日志，
+    # 不会因为没接 SaaS 就丢掉耗时归因（降级契约见 docs/architecture.md 第 6 节）。
+    LANGSMITH_TRACING: bool = False
+    LANGSMITH_API_KEY: str = ""
+    LANGSMITH_PROJECT: str = "inner-rag"
+    # 留空则用官方 SaaS；自建 / 代理部署时填完整 URL
+    LANGSMITH_ENDPOINT: str = ""
+    LANGSMITH_WORKSPACE_ID: str = ""
+
+    # ── Metrics ────────────────────────────────────────────────────────
+    # none：`/api/system/metrics` 返回 JSON；prometheus：返回 Prometheus 文本
+    METRICS_BACKEND: str = "none"
+    # 非空时 `/api/system/metrics` 需要 `X-Metrics-Token`（与登录态解耦，便于抓取器直连）
+    METRICS_TOKEN: str = ""
 
     @property
     def allowed_extensions_list(self) -> list[str]:

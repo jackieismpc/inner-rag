@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import sys
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,40 +11,17 @@ from loguru import logger
 
 from inner_rag.api import auth, chat, document, kb, system
 from inner_rag.core.config import settings
-from inner_rag.core.context import IdentityContextMiddleware, log_user
+from inner_rag.core.context import IdentityContextMiddleware
 from inner_rag.core.database import init_db
+from inner_rag.core.logging import RequestIdMiddleware, configure_logging
+from inner_rag.core.observability import tracer
 from inner_rag.core.security import verify_production_secret
 from inner_rag.providers import ProviderError, chat_health, embedding_health
 from inner_rag.services.retrieval_log import setup_rag_loggers
 
-if TYPE_CHECKING:  # loguru 只在类型桩里导出 Record，运行时不会有这个名字
-    from loguru import Record
-
-_LOG_FORMAT = (
-    "<green>{time:HH:mm:ss}</green> | <level>{level: <7}</level> | user={extra[user]} | {message}\n"
-)
-
-
-def _log_format(record: Record) -> str:
-    """把当前请求的用户塞进每条日志（见 ``core/context.py``），便于把「谁干的」对上号。
-
-    用 callable format 而不是 ``logger.patch``：patch 只作用于被 patch 的那一个 logger 实例，
-    而各模块各自 ``from loguru import logger``；sink 的格式则对全部日志生效。
-    """
-    record["extra"]["user"] = log_user()
-    return _LOG_FORMAT
-
-
-logger.remove()
-logger.add(sys.stdout, level=settings.LOG_LEVEL, format=_log_format)
-logger.add(
-    f"{settings.LOG_DIR}/app.log",
-    rotation="10 MB",
-    retention="7 days",
-    level=settings.LOG_LEVEL,
-    encoding="utf-8",
-    format=_log_format,
-)
+# 日志格式（text / json）与 sink 由 core/logging.py 统一配置：
+# 那里还要负责把 request_id 与 user 注入每条日志，放在入口处只是「什么时候配」的决定。
+configure_logging()
 
 
 @asynccontextmanager
@@ -56,6 +31,11 @@ async def lifespan(app: FastAPI):
     verify_production_secret()
     init_db()
     setup_rag_loggers()
+    tracer.configure()
+    logger.info(
+        f"追踪: {tracer.status()['backend']} | 日志格式: {settings.LOG_FORMAT} | "
+        f"指标后端: {settings.METRICS_BACKEND}"
+    )
     # 启动时只做配置校验（不发网络请求），配置有问题不阻断启动：
     # 服务照常起，/api/system/health 会给出可读原因
     for kind, health in (("LLM", chat_health(probe=False)), ("Embedding", embedding_health())):
@@ -78,7 +58,8 @@ app = FastAPI(
     openapi_url="/openapi.json" if settings.ENABLE_DOCS else None,
 )
 
-# 先加身份中间件、后加 CORS：后添加的在外层，CORS 需要最先看到请求（含预检）
+# 后添加的在外层：CORS 要先看到请求（含预检），request_id 必须在最外层
+# ——否则被 CORS 拦下的预检请求就没有 request_id，访问日志会缺一条。
 app.add_middleware(IdentityContextMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -88,6 +69,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestIdMiddleware)
 
 
 @app.exception_handler(ProviderError)
