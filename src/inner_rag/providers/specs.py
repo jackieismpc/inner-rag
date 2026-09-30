@@ -156,6 +156,18 @@ def _openai_chat() -> ProviderSpec:
     )
 
 
+def _vllm_chat() -> ProviderSpec:
+    return ProviderSpec(
+        name="vllm",
+        label="本地推理服务（vLLM / SGLang，OpenAI 兼容）",
+        kind=CHAT,
+        model=settings.VLLM_CHAT_MODEL,
+        base_url=settings.VLLM_BASE_URL,
+        docs_url="docs/operations.md",
+        notes="无需 API Key；需在本地先启动推理服务（见 docs/operations.md §本地 LLM）",
+    )
+
+
 def _mock_chat() -> ProviderSpec:
     return ProviderSpec(
         name="mock",
@@ -243,6 +255,7 @@ _CHAT_SPECS: dict[str, Callable[[], ProviderSpec]] = {
     "openrouter": _openrouter_chat,
     "deepseek": _deepseek_chat,
     "openai": _openai_chat,
+    "vllm": _vllm_chat,
     "mock": _mock_chat,
 }
 _EMBEDDING_SPECS: dict[str, Callable[[], ProviderSpec]] = {

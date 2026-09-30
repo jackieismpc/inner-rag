@@ -84,6 +84,11 @@ class Settings(BaseSettings):
     OPENAI_CHAT_MODEL: str = "gpt-4o-mini"
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
 
+    # 本地推理服务（vLLM / SGLang 等 OpenAI 兼容的本地部署），无需 API Key。
+    # 模型名取本地服务实际 served 的 model 名（sglang 默认是模型目录的完整路径）。
+    VLLM_BASE_URL: str = "http://127.0.0.1:8000/v1"
+    VLLM_CHAT_MODEL: str = "/data/users/mapengcheng/rustproject/qwen25-32b-gptq"
+
     # Mock（离线演示与测试：不联网、不需要密钥，但只有词面相似度）
     MOCK_CHAT_MODEL: str = "mock-chat"
     MOCK_EMBEDDING_MODEL: str = "mock-embedding"
@@ -149,7 +154,7 @@ class Settings(BaseSettings):
     # ── RAG ────────────────────────────────────────────────────────────
     CHUNK_SIZE: int = 1000
     CHUNK_OVERLAP: int = 200
-    TOP_K: int = 8  # 向量召回数量
+    TOP_K: int = 16  # 向量召回数量（粗排扩量 + rerank 收窄，两阶段检索；定标见 evaluation.md 4.7）
     RERANK_TOP_K: int = 5  # 进入 context 的条数
     RETRIEVAL_SCORE_THRESHOLD: float = 0.3  # 融合后分数的阈值（向量相关度 / 归一化 BM25）
     # hybrid 策略里词面检索（BM25）的权重：融合分数 = max(向量相关度, 权重 × 归一化 BM25)。
@@ -167,7 +172,7 @@ class Settings(BaseSettings):
     # 精排：对粗排结果重排，决定「谁进 context」（RERANK_TOP_K 通常小于 TOP_K，
     # 粗排 6–8 位会被整条丢掉）。none | lexical | llm，默认 none。
     # 打开前必须在评测集上证明有提升（回归 >2pp 不允许合入，见 docs/evaluation.md 第 7 节）。
-    RERANK_BACKEND: str = "none"
+    RERANK_BACKEND: str = "lexical"
     RERANK_LLM_TOP_N: int = 12  # llm 后端一次送进模型的候选上限（控制 token 成本）
     RERANK_LLM_SNIPPET_CHARS: int = 500  # llm 后端每条候选截取的字符数
     # 查询改写：补一路平行查询抹平措辞差（别名 / 口语化提问）。

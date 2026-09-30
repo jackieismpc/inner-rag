@@ -125,7 +125,43 @@ uv run alembic check                                 # 校验模型与迁移是�
 uv run alembic downgrade -1                           # 回退一步
 ```
 
+## 3.5 本地 LLM 推理服务（Qwen2.5-32B-GPTQ-Int4，SGLang）
+
+项目默认 LLM 已切换到本地部署的 Qwen2.5-32B-Instruct-GPTQ-Int4（`LLM_PROVIDER=vllm`），
+跑在服务器现有的 `sglang` conda 环境上，走 OpenAI 兼容接口。启动/关闭用仓库内脚本：
+
+```bash
+bash scripts/llm_start.sh          # 启动（默认 GPU 2，可传 GPU_ID 覆盖）
+bash scripts/llm_stop.sh           # 关闭
+curl http://127.0.0.1:8000/health  # 探测是否就绪（返回 200）
+```
+
+**模型与权重**：`~/rustproject/qwen25-32b-gptq`（19GB，GPTQ Int4，5 个 safetensors 分片），
+由 `modelscope download --model Qwen/Qwen2.5-32B-Instruct-GPTQ-Int4 --local_dir ./qwen25-32b-gptq`
+下载。32B 模型需要约 35GB 显存，单张 A100 40GB 可放（实测 GPU 2 占用 34.6GB）。
+
+**启动参数的关键点**（三个坑，都已写进 `llm_start.sh`）：
+
+1. **必须用 `--quantization gptq_marlin`，不是 `gptq`**：`gptq` 在 sampling 阶段触发
+   `CUDA device-side assert`（logits 数值问题导致 `torch.multinomial` 崩溃）；`gptq_marlin`
+   （marlin kernel 的 gptq 变体）数值稳定且更快。
+2. **必须用 `--attention-backend triton` + `--sampling-backend pytorch`**：默认的 flashinfer
+   后端需要 JIT 编译 CUDA kernel，而系统的 `/usr/bin/nvcc` 太旧（不支持
+   `--generate-dependencies-with-compile`，CUDA 12.x 才有），编译必失败。triton 后端纯 Python
+   kernel，无需本地 nvcc。
+3. **`nohup env CUDA_VISIBLE_DEVICES=N`**：`env` 必须写在 `nohup` 之后，否则变量被 nohup 吞掉、
+   不传给子进程（模型会落到默认 GPU 0，与其他任务抢显存）。
+
+**为什么用现成的 sglang 环境而非新装 vLLM**：服务器 `anaconda3/envs/` 下已有 `sglang`
+（0.5.5 + torch 2.8.0+cu128 + flashinfer + transformers 4.57，CUDA 已验证可用），而 `vllm` /
+`llm` 环境是空壳（未装包）。且 `/data` 磁盘 100% 满，装 vLLM 需再占 5-10GB。复用 sglang
+零安装、零磁盘压力，是当前约束下的最优解（方案对比见 CHANGELOG）。
+
+**回退**：本地服务跑不起来时，把 `.env` 的 `LLM_PROVIDER` 改回 `deepseek` 即可
+（`DEEPSEEK_API_KEY` 仍在 .env 中保留）。
+
 ## 4. 部署
+
 
 开发阶段用 SQLite + 云端 API 就能跑通全链路。
 

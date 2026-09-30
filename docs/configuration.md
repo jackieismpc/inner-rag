@@ -71,6 +71,7 @@ Chat 与 Embedding 是**两个独立开关**，改 `.env` 即可，代码无需�
 | `openrouter` | chat + embedding | `https://openrouter.ai/api/v1`，OpenAI 兼容聚合网关，一个 key 用数百个模型 |
 | `deepseek` | **仅 chat** | `https://api.deepseek.com/v1`，官方集成（`langchain-deepseek`）；模型名以[官方文档](https://api-docs.deepseek.com)为准（默认 `deepseek-flash`，另有 `deepseek-v4-pro`）；官方**没有 embeddings 接口**，写成 `EMBEDDING_PROVIDER=deepseek` 会得到明确报错 |
 | `openai` | chat + embedding | `https://api.openai.com/v1`；也可指向任何 OpenAI 兼容的自建网关 |
+| `vllm` | **仅 chat** | 本地推理服务（vLLM / SGLang 等 OpenAI 兼容自建服务），默认 `http://127.0.0.1:8000/v1`；无需 API Key，跑 Qwen2.5-32B-GPTQ-Int4；详见 §3.5 |
 | `mock` | chat + embedding | 不联网、不需要 key、输出确定性；用于本地演示 / CI / 降级验收（只有词面相似度，不能用来评估检索效果） |
 
 `GET /api/system/providers` 会列出全部可选项、当前选择与 key 是否已配置。
@@ -147,3 +148,20 @@ ollama pull qwen3-embedding:8b   # 向量模型（必须与建库时的 embeddin
 
 `LLM_PROVIDER=mock` + `EMBEDDING_PROVIDER=mock`，不需要任何模型服务，也能跑通
 「上传 → 检索 → 带引用回答」的完整链路。
+
+### 3.5 本地推理服务（vLLM / SGLang，默认 Chat 后端）
+
+Chat 默认走本地部署的 Qwen2.5-32B-Instruct-GPTQ-Int4（`LLM_PROVIDER=vllm`），
+跑在服务器的 sglang 环境上，OpenAI 兼容接口、无需 API Key：
+
+```bash
+# .env
+LLM_PROVIDER=vllm
+VLLM_BASE_URL=http://127.0.0.1:8000/v1
+VLLM_CHAT_MODEL=/data/users/mapengcheng/rustproject/qwen25-32b-gptq
+```
+
+启动 / 关闭用仓库脚本（`scripts/llm_start.sh` / `scripts/llm_stop.sh`），
+关键参数（`gptq_marlin` 量化、triton attention、nohup env 选卡）见 `docs/operations.md` 3.5。
+本地服务跑不起来时，把 `LLM_PROVIDER` 改回 `deepseek` 即回退。
+

@@ -128,11 +128,14 @@ def build_deepseek_chat(spec: ProviderSpec) -> BaseChatModel:
 
 
 def build_openai_compatible_chat(spec: ProviderSpec) -> BaseChatModel:
-    """OpenRouter / OpenAI 这类 OpenAI 兼容后端共用的构造器。"""
+    """OpenRouter / OpenAI / vLLM 这类 OpenAI 兼容后端共用的构造器。"""
+    # 本地推理服务（vLLM / SGLang）默认不校验 API Key，但 ChatOpenAI 要求非空，
+    # 传一个占位值即可——本地服务会忽略它。
+    api_key = spec.api_key or "EMPTY"
     return ChatOpenAI(
         base_url=spec.base_url,
         model=spec.model,
-        api_key=SecretStr(spec.api_key),
+        api_key=SecretStr(api_key),
         temperature=settings.LLM_TEMPERATURE,
         # langchain-openai 1.x 的输出长度字段是 max_completion_tokens（max_tokens 是旧别名）
         max_completion_tokens=settings.LLM_MAX_TOKENS,
@@ -148,5 +151,6 @@ CHAT_BUILDERS: dict[str, Callable[[ProviderSpec], BaseChatModel]] = {
     "openrouter": build_openai_compatible_chat,
     "deepseek": build_deepseek_chat,
     "openai": build_openai_compatible_chat,
+    "vllm": build_openai_compatible_chat,
     "mock": build_mock_chat,
 }

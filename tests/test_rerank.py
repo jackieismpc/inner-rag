@@ -203,9 +203,10 @@ def test_build_reranker_rejects_unknown_name_with_available_list() -> None:
         rerank.build_reranker("cross-encoder-from-nowhere")
 
 
-def test_default_backend_is_disabled() -> None:
-    assert settings.RERANK_BACKEND == "none"
-    assert rerank.is_enabled() is False
+def test_default_backend_is_lexical() -> None:
+    # 全库实测 lexical rerank 使 MRR 0.567→0.705（+0.138），已作为默认开启（见 evaluation.md 4.7）
+    assert settings.RERANK_BACKEND == "lexical"
+    assert rerank.is_enabled() is True
 
 
 # ── 接进检索层的时机 ──────────────────────────────────────────────────

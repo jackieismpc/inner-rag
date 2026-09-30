@@ -411,7 +411,7 @@ def test_providers_endpoint_lists_capabilities_without_secrets(
 
     chat_names = [item["name"] for item in body["data"]["chat"]]
     embedding_names = [item["name"] for item in body["data"]["embedding"]]
-    assert chat_names == ["ollama", "openrouter", "deepseek", "openai", "mock"]
+    assert chat_names == ["ollama", "openrouter", "deepseek", "openai", "vllm", "mock"]
     assert "deepseek" not in embedding_names
     active = next(item for item in body["data"]["chat"] if item["name"] == "openrouter")
     assert active["active"] is True

@@ -23,6 +23,33 @@
 - **效果**必须能被复现或引用（跑过的命令、通过的用例数、评测指标、trace 链接等）。
 ---
 
+## [Phase 8.4 收尾 + 本地 LLM] 2026-09-30 — 检索调优结论落地、rerank 默认开启、本地 Qwen2.5-32B 部署
+
+- 类型：优化 + 新增功能
+- 目的：回答三个调优问题并收尾 Phase 8.4，同时把默认 Chat 后端从云端 DeepSeek 切到本地部署的
+  Qwen2.5-32B-Instruct-GPTQ-Int4（降本 + 数据不出域）。
+- 检索调优（实验结论见 `docs/evaluation.md` 4.7）：
+  - **粗排扩量**：全库实测 k=8→16 仅 +2.2pp（79.3%→81.5%），k=32 才 +8.1pp；单独扩 k 性价比低，
+    正确做法是「粗排 16 + rerank 收窄到 Top-5」。默认 `TOP_K` 8→16。
+  - **rerank 默认开启**：`RERANK_BACKEND` none→`lexical`（无模型、候选集内 IDF 加权覆盖率），
+    全库 k=16 上 MRR 0.567→0.705（+0.138）。契约「只改顺序、不增删不改分」不变。
+  - **分块策略**：合并相邻页（2/3/4/5/8 页）对检索提升微乎其微且不单调，维持 1 块 = 1 页。
+    这是对原「8.4 按语义切分」计划的实测纠偏。
+  - **Sakura 约束**：查询改写保持 `QUERY_ALIASES` 为空，不做 Sakura→路明非 之类别名展开。
+- 本地 LLM 部署（方案对比 + 落地）：
+  - 权重 `~/rustproject/qwen25-32b-gptq`（19GB GPTQ-Int4）已就位；复用服务器现成 `sglang` conda 环境
+    （0.5.5 + torch cu128），而非新装 vLLM——`vllm`/`llm` 环境是空壳，且 `/data` 磁盘 100% 满。
+  - 新增 `vllm` provider（`LLM_PROVIDER=vllm`，OpenAI 兼容、无需 API Key），`VLLM_BASE_URL` /
+    `VLLM_CHAT_MODEL` 配置项；启动/关闭脚本 `scripts/llm_start.sh` / `scripts/llm_stop.sh`。
+  - 三个部署坑：`gptq` 量化触发 CUDA device assert（改 `gptq_marlin`）；flashinfer 需新 nvcc
+    （改 triton attention + pytorch sampling）；`nohup env` 选卡写法。详见 `docs/operations.md` 3.5。
+  - 回退：`.env` 把 `LLM_PROVIDER` 改回 `deepseek` 即可（Key 仍在）。
+- 全库回答指标（本地 Qwen 生成）：Recall@16=81.5%、MRR=0.705、要点命中率 77.8%、
+  引用命中率 78.5%、拒答正确率 90.9%、端到端 p50=1111ms。
+- 涉及提交：本条目所在提交
+
+---
+
 ## [Phase 8.2/8.4] 2026-09-30 — 本地 GPU 嵌入落地：Qwen3-Embedding 替换 OpenRouter，全库 11138 分块全覆盖
 
 - 类型：优化 + 修复
