@@ -1,13 +1,17 @@
-"""系统状态 API：健康检查、检索统计、缓存管理、provider 与模型列表。"""
+"""系统状态 API：健康检查、检索统计、缓存管理、指标、provider 与模型列表。"""
 
 from __future__ import annotations
 
 import asyncio
+import secrets
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi.responses import PlainTextResponse
 
 from inner_rag.api.deps import get_current_user
 from inner_rag.core.config import settings
+from inner_rag.core.metrics import metrics
+from inner_rag.core.observability import tracer
 from inner_rag.models import User
 from inner_rag.providers import (
     chat_health,
@@ -21,7 +25,7 @@ from inner_rag.services.retrieval_log import RetrievalStats
 
 router = APIRouter(prefix="/api/system", tags=["系统"])
 
-# /health 必须免鉴权：监控与探活不能依赖登录（且它永不 5xx，只报 degraded）。
+# /health 与 /metrics 必须免鉴权：监控与抓取不能依赖登录（/health 还永不 5xx，只报 degraded）。
 # 其余系统接口（provider 目录、统计、缓存、运行时配置、模型列表）需要登录。
 
 
@@ -51,6 +55,29 @@ async def health_check(
         "version": settings.APP_VERSION,
         "llm": llm,
         "embedding": embedding,
+    }
+
+
+@router.get("/metrics")
+async def get_metrics(x_metrics_token: str | None = Header(default=None)):
+    """进程内指标（延迟分位、缓存命中、token 用量、空召回等）。
+
+    免登录是为了让抓取器（Prometheus / curl）直连；需要门禁时配 `METRICS_TOKEN`，
+    比对用 `compare_digest`（定长时间比较，避免按响应耗时逐字节试探）。
+    """
+    expected = settings.METRICS_TOKEN
+    if expected and not (x_metrics_token and secrets.compare_digest(x_metrics_token, expected)):
+        raise HTTPException(status_code=401, detail="缺少或错误的 X-Metrics-Token")
+
+    if settings.METRICS_BACKEND == "prometheus":
+        return PlainTextResponse(metrics.render_prometheus(), media_type="text/plain")
+    return {
+        "data": {
+            "metrics": metrics.snapshot(),
+            "tracing": tracer.status(),
+            # 进程内累计是单 worker 语义：多副本部署时每个副本各记一份，看板要按实例聚合
+            "scope": "process",
+        }
     }
 
 
