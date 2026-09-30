@@ -25,6 +25,13 @@ uv run python -m benchmark.run_bench --mode kb --kb-id 3 --strategy hybrid --thr
   `--answer` 会额外调用 LLM，按题计费。
 * 检索统一走 ``inner_rag.services.retrieval.search``——与线上问答同一条路径，
   这样「评测涨了、线上没变」这类偏差不可能出现。
+* **期望页不在库里的题按 `--absent-items` 处理**（默认 `skip`）。评测集是照全库出的，
+  丢给只收了部分页的小库时，绝大部分题的答案根本不在库里，不筛的话它们全部按「召回为空」
+  记 0 分——那套数字量的是拒答策略，不是检索质量（见 `docs/evaluation.md` 2.1）。
+  判据是「该题全部引用页是否都在这个库实际入库的页里」，拿库的**真实内容**判定，
+  不硬编码页窗口常量（窗口一改就过期）。三个模式：
+  `skip` 跳过、`refuse` 改判成拒答题（小库量拒答能力用）、`score` 按未召回归零。
+  无论哪个模式，「只进来部分引用页」的题都跳过——它们的分数上限被人为压低，不可比。
 """
 
 from __future__ import annotations
@@ -95,6 +102,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help=f"阈值定标：跑一次未过滤检索并打印各阈值下的指标（不给值则用内置网格 {AUTO_SWEEP}）",
     )
     parser.add_argument("--answer", action="store_true", help="kb 模式：额外跑回答指标（调 LLM）")
+    parser.add_argument(
+        "--absent-items",
+        choices=("skip", "refuse", "score"),
+        default="skip",
+        help="期望页不在该库中时的处理：skip=跳过不计入指标（默认）；"
+        "refuse=改判为拒答题、计入拒答正确率（小库量拒答能力用）；"
+        "score=按未召回归零（跑全库时与 skip 等价）。两种模式下「只进来部分引用页」的题都跳过",
+    )
     parser.add_argument("--label", default="", help="配置标签，用于 README 表格里区分实验")
     parser.add_argument("--update-readme", action="store_true", help="把结果写入 README 基准表")
     parser.add_argument("--out-dir", type=Path, default=report.DEFAULT_RESULTS_DIR)
@@ -175,6 +190,20 @@ def _spans_of(hits: list[tuple[Any, float | None]]) -> list[tuple[int, int]]:
     return spans
 
 
+def generation_input(item: dict[str, Any]) -> str:
+    """答题模型能看到的东西：**只有 question**。
+
+    参考答案（`expected_answer`）、关键词（`answer_keywords`）、禁止词（`must_not_include`）
+    都是**评测侧的判据**，只能用在生成之后。它们一旦进了 prompt，「正确率」就退化成
+    「抄写能力」的度量，整张评测表随之失效。
+
+    所以这里把「取哪些字段」收敛成一个函数：调用方没有别的路径能拿这些话去拼 prompt。
+    这条约束由 `tests/test_eval_pipeline.py::test_answer_llm_never_sees_reference_answer`
+    在**模型边界**上断言（捕获真实发出的 prompt），而不是靠约定。
+    """
+    return str(item["question"])
+
+
 async def run_fixtures(
     args: argparse.Namespace, items: list[dict], fixtures: list[dict]
 ) -> list[dict]:
@@ -202,7 +231,7 @@ async def run_fixtures(
         started = time.perf_counter()
         hits, filtered_out = await retrieval.search(
             kb_id=FIXTURE_KB_ID,
-            query=item["question"],
+            query=generation_input(item),
             k=args.k,
             strategy=args.strategy,
             score_threshold=args.threshold,
@@ -218,6 +247,88 @@ async def run_fixtures(
             )
         )
     return results
+
+
+def _pages_in_store(kb_id: int) -> set[int]:
+    """该库实际入库了哪些源页号（取分块元数据里的 ``page``）。"""
+    from inner_rag.services.vector_store import vector_service
+
+    pages: set[int] = set()
+    for chunk in vector_service.iter_chunks(kb_id):
+        page = chunk.metadata.get("page")
+        if page is not None:
+            pages.add(int(page))
+    return pages
+
+
+def _filter_by_evidence(
+    items: list[dict], kb_id: int, absent_mode: str
+) -> tuple[list[dict], list[str], list[str]]:
+    """按「这个库里有没有这道题的引用页」处理题目，返回 ``(参加评测的题, 完全缺席, 仅部分在库)``。
+
+    为什么要按库的**真实内容**判定，而不是按建库脚本的页窗口常量：页窗口是实现细节，
+    改窗口、换数据集、换语料都会让它过期；而「这个题要的页，库里到底有没有」是事实
+    （读分块元数据里的 ``page``）。
+
+    ``absent_mode`` 决定「引用页完全不在库中」的题怎么处理：
+
+    * ``"skip"``：整条跳过，不参与任何指标。全量评测集丢给小库时，这类题有上百条，
+      它们全按「召回为空」记 0 分会同时压低 Recall 与页命中率，读起来像「检索变差了」，
+      而实际测的是拒答策略——所以默认跳过；
+    * ``"refuse"``：**改判成拒答题**。小库只装了源书的一部分页，于是「拿一个库里查不到
+      答案的问题去问」在小库上天然成立，而且这是真实分布（用户问什么不可控）。
+      把它们摘掉等于浪费了一批现成的拒答场景，所以这里改判 ``expect_refusal=True``，
+      让它们进 ``refusal_accuracy`` 的分子分母（``metrics.summarize`` 按这个字段分正负样本）。
+
+    「只进来部分引用页」的题**一律跳过**（两种模式下都是）：证据只到一半时，recall 的上限
+    被人为压到 1/2、1/3，模型据半份证据答对或答错都说明不了什么，判它「该拒答」也不公平。
+
+    没有引用页的题（本来就设计的拒答题）永远保留：它们就是用来量拒答的。
+    """
+    present = _pages_in_store(kb_id)
+    kept: list[dict] = []
+    absent: list[str] = []
+    partial: list[str] = []
+    for item in items:
+        expected = set(ds.expected_pages(item))
+        if not expected:
+            kept.append(item)
+            continue
+        missing = expected - present
+        if not missing:
+            kept.append(item)
+        elif len(missing) == len(expected):
+            absent.append(item["id"])
+            if absent_mode == "refuse":
+                # 复制而不是原地改：items 来自 load_eval_set 的返回值，改原对象会影响后续复用
+                kept.append({**item, "expect_refusal": True})
+        else:
+            partial.append(item["id"])
+    return kept, absent, partial
+
+
+def _report_absent(absent: list[str], partial: list[str], kb_id: int, mode: str) -> None:
+    """把「筛掉 / 改判」这件事说清楚：多少条、为什么、怎么看具体是哪些题。"""
+    if not absent and not partial:
+        return
+    if mode == "refuse":
+        print(
+            f"[bench] 库 {kb_id}：{len(absent)} 条题的引用页完全不在库中 → 已改判为拒答题，"
+            "计入「拒答正确率」（这是小库量拒答能力的默认用法）"
+        )
+    else:
+        print(
+            f"[bench] 库 {kb_id}：跳过 {len(absent)} 条题（引用页完全不在库中）——"
+            "按 0 分计会同时压低 Recall 与页命中率，读起来像「检索变差了」"
+        )
+    if partial:
+        print(f"[bench] 另有 {len(partial)} 条题只进来部分引用页：recall 上限被人为压低，跳过")
+    for label, ids in (("完全缺席", absent), ("部分在库", partial)):
+        if ids:
+            head = ", ".join(ids[:5])
+            more = f" …（共 {len(ids)} 条）" if len(ids) > 5 else ""
+            print(f"[bench]   {label}：{head}{more}")
+    print("[bench] 三个口径：skip（跳过，默认）/ refuse（改判为拒答题）/ score（按未召回归零）")
 
 
 async def run_kb(args: argparse.Namespace, items: list[dict]) -> list[dict]:
@@ -248,9 +359,10 @@ async def run_kb(args: argparse.Namespace, items: list[dict]) -> list[dict]:
     results: list[dict] = []
     for item in items:
         started = time.perf_counter()
+        # 检索与生成都只用 question：参考答案在这一步之后才参与打分（见 generation_input）
         hits, filtered_out = await retrieval.search(
             kb_id=args.kb_id,
-            query=item["question"],
+            query=generation_input(item),
             k=args.k,
             strategy=args.strategy,
             score_threshold=args.threshold,
@@ -274,7 +386,7 @@ async def run_kb(args: argparse.Namespace, items: list[dict]) -> list[dict]:
             # 而不是堆在实验维度上无处下钻（见 docs/evaluation.md 6.3）。
             async with tracer.span("eval.item", eval_id=item["id"], kb_id=args.kb_id):
                 answer, sources = await rag_service.chat(
-                    args.kb_id, item["question"], strategy=args.strategy
+                    args.kb_id, generation_input(item), strategy=args.strategy
                 )
                 result["trace_id"] = tracer.current_trace_id()
             result["total_ms"] = (time.perf_counter() - began) * 1000
@@ -360,7 +472,16 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
     if args.mode == "fixtures":
         results = await run_fixtures(args, items, fixtures)
         default_label = f"mock+fixtures 自检/{args.strategy}/k={args.k}"
+        absent: list[str] = []
+        partial: list[str] = []
     else:
+        if not args.kb_id:
+            msg = "kb 模式必须指定 --kb-id"
+            raise SystemExit(msg)
+        absent, partial = [], []
+        if args.absent_items != "score":
+            items, absent, partial = _filter_by_evidence(items, args.kb_id, args.absent_items)
+            _report_absent(absent, partial, args.kb_id, args.absent_items)
         results = await run_kb(args, items)
         config = _config_snapshot(args)
         default_label = f"kb{args.kb_id}/{config.get('embedding')}/{args.strategy}/k={args.k}"
@@ -375,6 +496,12 @@ async def _run(args: argparse.Namespace) -> dict[str, Any]:
         "summary": metrics.summarize(results),
         "items": results,
         "result_file": None,
+        # 跳过/改判明细随结果落盘：否则两个月后看到「题数只有 10」会以为是数据集缩水了
+        "absent_items": {
+            "mode": args.absent_items,
+            "completely": absent,
+            "partially": partial,
+        },
     }
     sweep_values = getattr(args, "sweep_values", None)
     if sweep_values:
@@ -418,6 +545,12 @@ def main(argv: list[str] | None = None) -> int:
 
     print(report.console_table(record))
     summary = record["summary"]
+    absent = record.get("absent_items") or {}
+    skipped = len(absent.get("completely", [])) + len(absent.get("partially", []))
+    if absent.get("mode") == "refuse":
+        skipped_note = f"，另 {skipped} 条引用页不在库中（已改判为拒答题）" if skipped else ""
+    else:
+        skipped_note = f"，另跳过 {skipped} 条（引用页不在库中）" if skipped else ""
     result_line = (
         f"结果已写入 {record['result_file']}"
         if record["result_file"]
@@ -435,7 +568,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     print(
         f"\n配置：{record['label']}\n"
-        f"题目：{summary['items']}（正样本 {summary['positives']} / 负样本 {summary['negatives']}）\n"
+        f"题目：{summary['items']}（正样本 {summary['positives']} / 负样本 {summary['negatives']}）"
+        f"{skipped_note}\n"
         f"Recall@{args.k}={summary['recall_at_k']:.1%}  MRR={summary['mrr']:.3f}  "
         f"页命中率={summary['page_hit_rate']:.1%}\n"
         f"{answer_line}"

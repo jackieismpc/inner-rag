@@ -104,7 +104,7 @@ async def list_providers(user: User = Depends(get_current_user)):
 
 @router.get("/plugins")
 async def list_plugins(user: User = Depends(get_current_user)):
-    """五个插件点（chat / embedding / 向量库 / 缓存 / 队列）的当前实现与可选实现。
+    """所有插件点（chat / embedding / 向量库 / 缓存 / 队列 / 精排 / 查询改写）的当前实现与可选实现。
 
     存在的意义：替换演练与排障都要能回答「现在到底跑的哪个后端」。逐插件点手工统计
     （改配置项就要改接口）迟早会漏，所以这里直接遍历注册表，第三方实现也一并列出。

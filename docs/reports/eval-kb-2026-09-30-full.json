@@ -1,0 +1,25 @@
+{
+  "kb_id": 4,
+  "name": "dragon_king_full",
+  "profile": "full",
+  "source": "data/uploads/龙族.pdf",
+  "source_sha256": "18eecb012c032cb0cf4829ebe108de039da01f14331d4085bddd13e215daf716",
+  "page_windows": [
+    [
+      1,
+      11165
+    ]
+  ],
+  "pages": 11138,
+  "chunks": 11138,
+  "chunk_size": 1000,
+  "chunk_overlap": 200,
+  "embedding_identity": "sentence_transformers:Qwen/Qwen3-Embedding-0.6B",
+  "embedding_max_input_chars": 0,
+  "app_version": "0.3.0",
+  "git_commit": "2b5343b",
+  "built_at": "2026-09-30T11:22:10+00:00",
+  "duration_s": 66.5,
+  "est_cost_usd": 0.0,
+  "warnings": []
+}

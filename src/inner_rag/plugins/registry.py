@@ -38,6 +38,8 @@ if TYPE_CHECKING:
 
     from inner_rag.providers.specs import ProviderSpec
     from inner_rag.services.cache import CacheBackend
+    from inner_rag.services.query_rewrite import QueryRewriter
+    from inner_rag.services.rerank import Reranker
     from inner_rag.services.task_queue import TaskQueue
     from inner_rag.services.vector_store.base import VectorStore
 
@@ -67,7 +69,8 @@ class EmbeddingProvider:
 
 
 class Registry[T]:
-    """名字 → 实现的注册表。每个插件点一个实例（chat / embedding / vector store / cache / queue）。"""
+    """名字 → 实现的注册表。每个插件点一个实例（chat / embedding / vector store / cache /
+    queue / rerank / query rewrite）。"""
 
     def __init__(self, key: str, kind: str, group: str, settings_key: str) -> None:
         self._key = key  # 机器可读的插件点 id，用作 /api/system/plugins 的键
@@ -155,7 +158,7 @@ class Registry[T]:
         return loaded
 
 
-# 五个插件点。provider 的注册表存的是「spec + builder」成对实现，其余存的是无参工厂函数。
+# 七个插件点。provider 的注册表存的是「spec + builder」成对实现，其余存的是无参工厂函数。
 chat_providers: Registry[ChatProvider] = Registry(
     "chat", "chat provider", "inner_rag.chat_providers", "LLM_PROVIDER"
 )
@@ -171,6 +174,14 @@ cache_backends: Registry[Callable[[], CacheBackend]] = Registry(
 task_queues: Registry[Callable[[], TaskQueue]] = Registry(
     "task_queue", "task queue", "inner_rag.task_queues", "TASK_QUEUE_BACKEND"
 )
+# 检索质量侧的两个插件点（Phase 8）：都在 retrieval.search 内部生效，
+# 都默认 ``none``——它们会改变召回集合或排序，必须先在评测集上证明有提升再打开。
+rerankers: Registry[Callable[[], Reranker]] = Registry(
+    "rerank", "reranker", "inner_rag.rerankers", "RERANK_BACKEND"
+)
+query_rewriters: Registry[Callable[[], QueryRewriter]] = Registry(
+    "query_rewrite", "query rewriter", "inner_rag.query_rewriters", "QUERY_REWRITE_BACKEND"
+)
 
 ALL_REGISTRIES: tuple[Registry[Any], ...] = (
     chat_providers,
@@ -178,7 +189,23 @@ ALL_REGISTRIES: tuple[Registry[Any], ...] = (
     vector_stores,
     cache_backends,
     task_queues,
+    rerankers,
+    query_rewriters,
 )
+
+
+def _ensure_builtin_implementations() -> None:
+    """确保所有内置实现都已注册，再让 :func:`plugin_status` 报数。
+
+    大多数插件点的内置实现在**模块导入期**注册（导入即注册）；chat / embedding 是例外——
+    它们的 spec 与构造器互相引用，只能延迟到运行时注册（见 ``providers/specs.py``）。
+    不显式触发的话，``available`` 是否完整就取决于「本进程此前有没有解析过 provider」：
+    注册表为空时所有配置的 ``is_active()`` 都是 False，健康检查会跟着误报降级。
+    """
+    # 函数内 import：providers.specs 在模块级 import 本模块，模块级反向 import 会成环
+    from inner_rag.providers.specs import ensure_builtin_providers
+
+    ensure_builtin_providers()
 
 
 def plugin_status() -> dict[str, dict[str, Any]]:
@@ -187,6 +214,7 @@ def plugin_status() -> dict[str, dict[str, Any]]:
     ``active`` 为 False 说明配置指向了一个不存在的实现——正常情况下服务启动时就会
     因「未知后端」抛错，这里如实报出来是为了让「启动没炸但行为不对」也能一眼看见。
     """
+    _ensure_builtin_implementations()
     report: dict[str, dict[str, Any]] = {}
     for registry in ALL_REGISTRIES:
         # 幂等：状态接口只是把「注册表里到底有什么」如实报出来

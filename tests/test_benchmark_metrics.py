@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -244,3 +245,157 @@ def test_eval_anchors_match_source_pdf() -> None:
     items = ds.load_eval_set()
     fixtures = ds.load_fixtures()
     assert ds.validate(items, fixtures) == []
+
+
+def _load_gen_fixtures() -> Any:
+    """按路径加载 scripts/gen_eval_fixtures.py（scripts/ 不是包，不能直接 import）。"""
+    import importlib.util
+
+    path = ds.REPO_ROOT / "scripts" / "gen_eval_fixtures.py"
+    spec = importlib.util.spec_from_file_location("gen_eval_fixtures", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_excerpt_fits_under_the_limit_on_a_long_page() -> None:
+    """窗口上限要留余量，否则长页永远裁不出片段。
+
+    旧实现把窗口扩到正好 199 字，紧接着又被 `len(text) >= 199` 否掉——源书几乎没有短于
+    199 字的页，所以它等价于「这个脚本裁不出任何片段」，只是失败长相很像「这几条题定位不到」。
+    """
+    module = _load_gen_fixtures()
+    page = "前" * 500 + "关键证据在这里" + "后" * 500
+
+    excerpt, reason = module.excerpt_around(page, "关键证据在这里", 199)
+
+    assert reason == ""
+    assert excerpt is not None
+    assert len(excerpt) < 200
+    assert "关键证据在这里" in excerpt
+
+
+def test_excerpt_stays_a_substring_of_the_page() -> None:
+    """裁出来的必须是页文本的**原样子串**——锚点校验就是这么比的。"""
+    module = _load_gen_fixtures()
+    page = "开头一句。\n\n    引用片段在这一行里   \n结尾一句。"
+
+    excerpt, _ = module.excerpt_around(page, "引用片段在这一行里", 199)
+
+    assert excerpt is not None
+    assert excerpt in page
+
+
+def test_excerpt_separates_the_two_failure_reasons() -> None:
+    """「引用不在这页」与「引用本身超长」要分开报：前者是题目/页码问题，后者只是上限问题。"""
+    module = _load_gen_fixtures()
+
+    missing, missing_reason = module.excerpt_around("这是一页正文", "别处的句子", 199)
+    assert missing is None
+    assert "不在这一页" in missing_reason
+
+    long_quote = "长" * 250
+    too_long, too_long_reason = module.excerpt_around("正文" + long_quote + "正文", long_quote, 199)
+    assert too_long is None
+    assert "上限" in too_long_reason
+
+
+@pytest.mark.skipif(not ds.DEFAULT_PDF.exists(), reason="本地无 龙族.pdf，跳过提取器一致性校验")
+def test_page_text_is_the_same_as_what_ingest_parsed(tmp_path: Path) -> None:
+    """锚点校验读到的文本必须与**入库解析出来的文本**同源。
+
+    这里曾经是两套提取器：校验与裁 fixture 用 pymupdf 的 `get_text()`，而入库解析
+    （`inner_rag.services.parser` 的 PDF 分支）用 pypdf 的 `extract_text()`。实测源书 p9
+    两边给出 222 字 / 184 字且断句不同，于是「引用片段必须出现在该页原文里」这条校验
+    比的是另一份文本——正确的题被判成锚点错误。这条用例用**真实 parser 解析单页**来钉住一致性。
+    """
+    from pypdf import PdfReader, PdfWriter
+
+    from inner_rag.services.parser import DocumentParser
+
+    page = 9
+    source = PdfReader(str(ds.DEFAULT_PDF))
+    writer = PdfWriter()
+    writer.add_page(source.pages[page - 1])
+    single_page = tmp_path / "single.pdf"
+    with single_page.open("wb") as handle:
+        writer.write(handle)
+
+    documents, _ = DocumentParser().parse(str(single_page))
+    ingested = documents[0].page_content
+
+    assert ingested  # 解析出了东西，否则下面那句只是「空 == 空」
+    assert ingested == ds.PageText(ds.DEFAULT_PDF)(page)
+
+
+# ── 「答案不在库里」的题要被摘掉 ────────────────────────────────────────
+#
+# 评测集照全库出题，而小库只收了源书的一部分页。不筛的话，小库上 90% 的题会以
+# 「召回为空」记 0 分，整套指标量的是拒答策略而不是检索质量。筛选依据是库的**真实内容**
+# （分块元数据里的 page），不是建库脚本里的页窗口常量——后者会随窗口调整而过期。
+
+
+def test_filter_by_evidence_skips_incomplete_items(monkeypatch: pytest.MonkeyPatch) -> None:
+    from benchmark import run_bench
+
+    monkeypatch.setattr(run_bench, "_pages_in_store", lambda _kb_id: {10, 11, 20})
+    items = [
+        {"id": "full", "citations": [{"page": 10}, {"page": 11}]},
+        {"id": "partial", "citations": [{"page": 10}, {"page": 999}]},
+        {"id": "absent", "citations": [{"page": 999}]},
+        {"id": "refusal", "citations": [], "expect_refusal": True},
+    ]
+
+    kept, absent, partial = run_bench._filter_by_evidence(items, 1, "skip")
+
+    assert [item["id"] for item in kept] == ["full", "refusal"]
+    assert absent == ["absent"]
+    assert partial == ["partial"]
+
+
+def test_filter_by_evidence_can_turn_absent_items_into_refusals(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """小库上「答案根本不在库里」的题，正好是天然的拒答场景，别浪费。
+
+    改判后它们进 negatives（`expect_refusal=True`），于是 `refusal_accuracy` 的分母里
+    包含了这批真实分布的问题；同时必须**复制**而不是原地改，免得污染调用方的 items。
+    """
+    from benchmark import run_bench
+
+    monkeypatch.setattr(run_bench, "_pages_in_store", lambda _kb_id: {10})
+    items = [
+        {"id": "absent", "citations": [{"page": 999}], "expect_refusal": False},
+        {"id": "partial", "citations": [{"page": 10}, {"page": 999}], "expect_refusal": False},
+        {"id": "full", "citations": [{"page": 10}], "expect_refusal": False},
+    ]
+
+    kept, absent, partial = run_bench._filter_by_evidence(items, 1, "refuse")
+
+    assert [(item["id"], item["expect_refusal"]) for item in kept] == [
+        ("absent", True),
+        ("full", False),
+    ]
+    assert absent == ["absent"] and partial == ["partial"]
+    # 原对象没被改（partial 被跳过、absent 被改判，原列表都保持原样）
+    assert [item["expect_refusal"] for item in items] == [False, False, False]
+
+
+def test_filter_by_evidence_keeps_everything_when_the_kb_is_complete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """全库上不该动任何题——否则「筛掉难例把分数做上去」就成了一条捷径。"""
+    from benchmark import run_bench
+
+    monkeypatch.setattr(run_bench, "_pages_in_store", lambda _kb_id: set(range(1, 12_000)))
+    items = [
+        {"id": "a", "citations": [{"page": 9}]},
+        {"id": "b", "citations": [{"page": 11063}]},
+        {"id": "neg", "citations": [], "expect_refusal": True},
+    ]
+
+    for mode in ("skip", "refuse"):
+        kept, absent, partial = run_bench._filter_by_evidence(items, 7, mode)
+        assert len(kept) == 3, f"{mode} 模式在全库上跳了题"
+        assert absent == [] and partial == []

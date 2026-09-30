@@ -17,18 +17,20 @@
 
 不设用例数量目标；README 里的用例数只是**现状快照**，不是 KPI。
 
-现状（Phase 0–8.1，用例数是快照不是目标）：
+现状（Phase 0–8.3，用例数是快照不是目标）：
 
 - `pyproject.toml` 里 `addopts = "-m 'not live'"`，即**默认只跑离线用例**；
 - `markers` 已注册 `live`；`live` 用例必须显式 `-m live` 才执行；
 - `tests/conftest.py` 强制把 `LLM_PROVIDER` / `EMBEDDING_PROVIDER` 钉成 `mock`、设置
   `EMBEDDING_MAX_INPUT_CHARS`、并把 `TASK_QUEUE_BACKEND` 设为 `inline`
   （后台任务在请求内同步跑完，用例不必等队列），保证**不受开发者本机 `.env` 影响**；
-- 用例数快照：**279 个离线用例**（Phase 8.1 后），其中登录 / 鉴权 / ACL 在 `tests/test_auth.py`
+- 用例数快照：**337 个离线用例**（Phase 8.3 后；`uv run pytest --collect-only -q` 报 `337/345`，
+  差掉的 8 个是 `-m live` 联网验收用例），其中登录 / 鉴权 / ACL 在 `tests/test_auth.py`
   （多为参数化路由表，例如「11 条受保护路由全部 401」是一条用例的参数化而不是 11 条用例）；
 - **契约测试参数化跑所有实现**，这是 Phase 7 的核心验收方式：
   - 向量库 `tests/test_vector_store.py`：`store` fixture 参数化跑 `zvec / chroma / memory`，
     同一份用例（相关度口径、阈值计数、MMR 无分数、元数据白名单、删除可见性）覆盖三个实现；
+    另有一组**断点续跑**用例（见下）；
   - 缓存 `tests/test_cache.py`：`BACKEND_FACTORIES` 参数化跑后端，业务缓存用例单独一组；
   - 任务队列 `tests/test_task_queue.py`：并发上限、退避重试后的 attempts、永久失败的归因、历史有界；
   - 关系库 `tests/test_repositories.py`：直接对仓储断言（含 `history` 取最近 N 条、
@@ -44,9 +46,62 @@
     **词面启用门槛**（两路都无实质证据时不采信词面，尤其是负样本题的形状）、
     以及三种策略各自是否调用词面（`similarity` 绝不调用、权重 0 = 显式关闭）；
     用假后端 + 假索引，不需要真向量库或网络；
+- 精排与查询改写（Phase 8.2 / 8.3，同样是「先有失效场景再写用例」）：
+  - `tests/test_rerank.py`：契约本身（`none` / `lexical` 都**保持条数与分数不变**）、
+    `candidate_idf`（查询词人人皆有时权重趋近 0）、`parse_order`（去重 / 丢越界 / 垃圾输入）、
+    LLM 后端解析与异常兜底、`RERANK_LLM_TOP_N` 之外的 tail 保持原序；
+    以及**接进检索层的时机**——关闭时绝不调用、在阈值过滤**之后**才调用、
+    重排结果真的决定谁进 context、实现违约（改条数）时退回原顺序；
+  - `tests/test_query_rewrite.py`：契约「**首条恒为原查询**」参数化跑三个实现、
+    `strip_stopwords` 只替换不删除（保留词边界）、`parse_aliases` 坏行告警跳过、
+    alias 大小写不敏感且无匹配时保持惰性、模块级入口的截断 / 去重 / 实现违约时补回原查询、
+    以及多查询确实「一个变体跑一次召回」（`seen == ["Sakura", "路明非"]`）；
+  - `tests/test_embedding.py`：并发分批的**真并发**（用假后端记录 `max_inflight` 断言并发上限、
+    按「批首文本」记账以区分重试与首次）、单批瞬时失败重试后成功、永久失败在耗尽尝试次数后抛出、
+    **硬失败时取消兄弟批次**（不留下还在烧配额的请求）、批内保序、空输入不发请求、
+    `EMBEDDING_TIMEOUT` 真的传给了 OpenAI 兼容后端；
+  - 同文件末尾一组**本地后端的设备解析**（用假 `torch` 注入 `is_available()` 与 `version.cuda`）：
+    有 CUDA 时选 `cuda`、显式 `cuda:1` 原样保留、显式 `cpu` 时**根本不去 import torch**、
+    CUDA 不可用时**退回 CPU 并把成因写进 WARNING**（「构建比驱动新」与「CPU 版 torch」两种文案要能区分）、
+    没装 torch 的机器上构造实例也不炸、解析结果**只算一次**（否则每取一次 device 就重探一次、告警重复刷屏），
+    外加「构造器不做重活」（返回后 `_model is None`，权重未被加载）；
+- 入库的**幂等与断点续跑**（Phase 8.4，`tests/test_vector_store.py`）——它是一组契约用例，
+  因为「重跑等于续跑」是写入路径的**基本要求**而不是某个后端的优化：
+  - `test_resume_after_interruption_fills_the_gap`：用「第 N 次批量嵌入抛异常」制造**真实中断**，
+    断言中断前已落库（partial > 0）、重跑只补缺口（`written == total - partial`）、
+    总数与源页数一致（不遗漏）、分块键集合恰好是 0..total-1（不重复）、再跑一次返回 0；
+  - `test_interruption_cancels_remaining_batches`：在 `embed_batches_in_order` 层面验证「失败即取消兄弟批次」。
+    用**20ms 对 5s 的时差**做确定性判定（第 2 批慢到「没被取消就一定会跑完」），
+    而不是靠假后端嵌入的调度运气——否则这条用例会间歇性假绿；
+  - `test_stored_chunk_keys_reports_only_that_document` / `.._is_empty_for_unknown_kb`：
+    进度查询按文档隔离、未入库的库返回空集而不是抛异常；
+  - `test_normalized_chunk_key_stringifies_chunk_index`：`chunk_index` 在内存后端是 int、
+    在 zvec schema 里是 STRING，不统一字符串化会把「已入库」判成「没有」，续跑时白跑一整份文档；
+  - 配套断言写入语义的变化：`add_documents` 返回「**本次新写入**」的分块数，因此
+    `test_zvec_reingest_does_not_accumulate` / `test_memory_reingest_does_not_accumulate`
+    的第二次数值从「分块总数」改成了 **0**（行为契约变了，用例跟着改）；
+- **答案保密**（Phase 8.4，`tests/test_eval_pipeline.py`）：
+  `test_answer_llm_never_sees_reference_answer` 跑一次真实的 `run_bench.run_kb(--answer)`，
+  在模型边界上**捕获每一个 prompt**，断言参考答案 / 关键词 / 禁止词一个都没出现，
+  同时断言语料正文**在** prompt 里（否则这条用例只是在证明「什么都没发」）；
+  `test_answer_llm_prompt_still_contains_retrieved_context` 是它的反面（prompt 必须含召回内容）。
+  这两条把「不给模型看答案」从约定变成了断言——参见 `docs/evaluation.md` 2.4；
 - 测试库与向量库都用临时目录，不写 `./data`；跑完即清理；
 - `benchmark/` 的指标与评测集校验也有离线用例（`tests/test_benchmark_metrics.py`，
   含 `citation_hit` 与 `citation_precision` 的口径差异、以及缺字段时聚合成 `None` 而不是 0 分）；
+  该文件还钉住三条容易悄悄退化的不变量：
+  - **页文本与入库解析同源**：`test_page_text_is_the_same_as_what_ingest_parsed` 用**真实
+    `DocumentParser` 解析单页**，断言结果与 `benchmark.dataset.PageText` 完全一致。这条守的是
+    「锚点校验读的文本」＝「入库时读的文本」——早先是两套提取器（校验用 PyMuPDF、入库用 pypdf），
+    同一页给出的文本不同，正确的题会被判成锚点错误；
+  - **fixture 片段必须留在上限内**：`test_excerpt_fits_under_the_limit_on_a_long_page` 用 1000 字的页
+    验证「窗口扩到 199 字又被 `≥199` 否掉」这类 off-by-one 不会回归（旧实现下长页一律裁不出片段）；
+  - **按库内证据筛题 / 改判**：`test_filter_by_evidence_skips_incomplete_items`（小库上引用页不在
+    库中的题被跳过，「只进来部分引用页」的题也跳过——避免把拒答算成检索失败）、
+    `test_filter_by_evidence_can_turn_absent_items_into_refusals`（`refuse` 模式把它们改判成
+    拒答题参与 `refusal_accuracy`，且必须**复制**而不能原地改，否则污染调用方的 items）、
+    `test_filter_by_evidence_keeps_everything_when_the_kb_is_complete`（全库上一条都不许跳，
+    否则「筛掉难例涨分」就成了捷径）；
   `--mode fixtures` 的评测自检不在 pytest 里，要单独跑（见第 6 节）。
 
 ## 2. 目录与命名
@@ -63,8 +118,15 @@ tests/
 ├── test_parser.py           # L1/L2：解析与 OCR 后端行为
 ├── test_providers.py        # L1：spec 解析、错误文案、健康检查状态机
 ├── test_vector_store.py     # L1/L2：写入、检索策略、阈值、相关度换算（参数化跑 zvec / chroma / memory）
+├── test_lexical.py          # L1：中文 bigram 分词、BM25 排序、索引按库缓存与失效、归一化
+├── test_retrieval.py        # L1/L2：融合去重取较大分、阈值时机、词面启用门槛、三策略调用面
+├── test_rerank.py           # L1/L2：精排契约（只改顺序）、candidate_idf、parse_order、接入时机与违约兜底
+├── test_query_rewrite.py    # L1/L2：改写契约（首条恒为原查询）、停用词剥离、别名表、多查询召回
+├── test_embedding.py        # L1：并发分批真并发、单批重试、硬失败取消兄弟批次、批内保序、超时下发、设备解析
+├── test_eval_pipeline.py    # L4：建库 manifest、页区间命中判定、回答侧评测的聚合与对比
 ├── test_benchmark_metrics.py # L1/L4：基准指标算法、评测集 schema 与锚点校验
 ├── test_observability.py    # L1/L2：request_id、结构化日志、span 树、指标与 Prometheus 导出
+├── test_langsmith_live.py   # L3：LangSmith 上报读回（-m live）
 └── test_live_providers.py   # L3：真实联网（-m live）
 ```
 

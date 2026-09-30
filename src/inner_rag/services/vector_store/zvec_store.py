@@ -32,12 +32,13 @@ from inner_rag.services.embedding import embedding_service
 from inner_rag.services.vector_store.base import (
     CHUNK_METADATA_FIELDS,
     MMR_FETCH_FACTOR,
-    WRITE_BATCH_SIZE,
     Strategy,
     distance_to_relevance,
+    embed_batches_in_order,
     finalize_results,
     maximal_marginal_relevance,
     merge_hybrid,
+    normalized_chunk_key,
     prepare_chunks,
     resolve_search_defaults,
 )
@@ -93,41 +94,83 @@ class ZvecVectorStore:
             logger.warning(f"[VECTOR_STORE] doc_id={doc_id} 未产生任何有效分块")
             return 0
 
-        texts = [chunk.page_content for chunk in chunks]
+        # 断点续跑：向量库本身就是进度记录，已经入库的分块直接跳过
+        stored = self.stored_chunk_keys(kb_id, doc_id)
+        pending = [chunk for chunk in chunks if normalized_chunk_key(chunk) not in stored]
+        skipped = len(chunks) - len(pending)
+        if not pending:
+            # 「续跑时发现已经全部入库」的正常路径。仍然补一次 optimize：上一次若是在
+            # 最后一批 flush 与 optimize 之间被杀（flush 已持久化、索引还没补），
+            # 这里就是唯一的补齐机会；optimize 幂等，已经补过时几乎不花时间。
+            await asyncio.to_thread(self._optimize, kb_id)
+            logger.info(
+                f"[VECTOR_STORE] doc_id={doc_id} {len(chunks)} 个分块全部已在库中，无需重复入库"
+            )
+            return 0
+        if skipped:
+            logger.info(f"[VECTOR_STORE] doc_id={doc_id} 跳过已入库的 {skipped} 个分块，续跑")
+
         started = time.perf_counter()
-        vectors = await embedding_service.aembed_documents(texts)
-        logger.info(
-            f"[EMBED] doc_id={doc_id} | chunks={len(chunks)} | "
-            f"embed_time={(time.perf_counter() - started) * 1000:.1f}ms"
-        )
+        written = 0
+        # 边嵌入边落库：中断最多丢「在途的那几批」，重跑接着写
+        async for batch, vectors in embed_batches_in_order(pending):
+            await asyncio.to_thread(self._write_batch, kb_id, doc_id, batch, vectors)
+            written += len(batch)
+        await asyncio.to_thread(self._optimize, kb_id)
 
-        await asyncio.to_thread(self._write_chunks, kb_id, doc_id, chunks, vectors)
         logger.info(
-            f"[VECTOR_STORE] 写入 kb={kb_id} doc_id={doc_id} "
-            f"filename={filename} chunks={len(chunks)}"
+            f"[EMBED] doc_id={doc_id} | chunks={written} | skipped={skipped} | "
+            f"embed+write_time={(time.perf_counter() - started) * 1000:.1f}ms"
         )
-        return len(chunks)
+        logger.info(
+            f"[VECTOR_STORE] 写入 kb={kb_id} doc_id={doc_id} filename={filename} chunks={written}"
+        )
+        return written
 
-    def _write_chunks(
+    def stored_chunk_keys(self, kb_id: int, doc_id: int) -> set[tuple[str, str]]:
+        collection = self._existing(kb_id)
+        if collection is None:
+            return set()
+        target = str(doc_id)
+        # zvec 的 iter_docs 不支持 filter，只能扫完再筛（和 _count_document_chunks 同一取舍）：
+        # 只取两个标量字段且不取向量，且每个文档只在入库开头做一次，代价可接受。
+        with collection.iter_docs(
+            output_fields=["doc_id", "chunk_index"], include_vector=False
+        ) as docs:
+            return {
+                (str(doc.fields.get("doc_id")), str(doc.fields.get("chunk_index")))
+                for doc in docs
+                if str(doc.fields.get("doc_id")) == target
+            }
+
+    def _write_batch(
         self, kb_id: int, doc_id: int, chunks: list[Document], vectors: list[list[float]]
     ) -> None:
-        """分批 upsert → flush → optimize（全在 native 侧，调用方放进线程）。"""
+        """一批 upsert + flush（全在 native 侧，调用方放进线程）。
+
+        每批都 flush 是刻意的：flush 才是持久化点，逐批 flush 让「进程被杀」也只丢在途批次。
+        ``optimize`` 不在这里做——它是整份文档级别的收尾动作，见 ``_optimize``。
+        """
         collection = self._writable(kb_id, len(vectors[0]))
-        for start in range(0, len(chunks), WRITE_BATCH_SIZE):
-            batch = chunks[start : start + WRITE_BATCH_SIZE]
-            docs = [
-                zvec.Doc(
-                    id=_chunk_id(kb_id, doc_id, str(chunk.metadata["chunk_index"])),
-                    vectors={VECTOR_FIELD: vectors[start + offset]},
-                    fields={**chunk.metadata, CONTENT_FIELD: chunk.page_content},
-                )
-                for offset, chunk in enumerate(batch)
-            ]
-            _ensure_ok(collection.upsert(docs), f"upsert kb={kb_id} doc_id={doc_id}")
+        docs = [
+            zvec.Doc(
+                id=_chunk_id(kb_id, doc_id, str(chunk.metadata["chunk_index"])),
+                vectors={VECTOR_FIELD: vector},
+                fields={**chunk.metadata, CONTENT_FIELD: chunk.page_content},
+            )
+            for chunk, vector in zip(chunks, vectors, strict=True)
+        ]
+        _ensure_ok(collection.upsert(docs), f"upsert kb={kb_id} doc_id={doc_id}")
         collection.flush()
-        # optimize 之后索引完备度才到 1.0：不调用也能查到（走未索引段的暴力扫描），
-        # 但代价随库增长，因此在每次入库结束时补上
-        collection.optimize()
+
+    def _optimize(self, kb_id: int) -> None:
+        """整份文档写完后补索引：optimize 之后索引完备度才到 1.0。
+
+        不调用也能查到（走未索引段的暴力扫描），但代价随库增长，所以在入库结束时补一次。
+        """
+        collection = self._existing(kb_id)
+        if collection is not None:
+            collection.optimize()
 
     # ── 检索 ───────────────────────────────────────────────────────────
 

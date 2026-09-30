@@ -49,11 +49,15 @@ class Settings(BaseSettings):
     SQL_ECHO: bool = False
 
     # ── LLM / Embeddings：provider 选择 ─────────────────────────────────
-    # API 优先：开发时直接调云端 API，不依赖本地 Ollama；需要本地/离线时可切 mock。
     #   LLM_PROVIDER       = ollama | openrouter | deepseek | openai | mock
-    #   EMBEDDING_PROVIDER = ollama | openrouter | openai | mock（DeepSeek 没有 embedding API）
+    #   EMBEDDING_PROVIDER = sentence_transformers | ollama | openrouter | openai | mock
+    #                        （DeepSeek 没有 embedding API）
+    # 向量侧默认走**本地部署的 Qwen 开源权重**（sentence-transformers，进程内推理）：
+    # 没有配额、没有费用、不依赖网络，全量建库可以反复重跑——云端网关按请求数限流的
+    # 额度（有的只有 1000 次/天）撑不住一次全量重建，更撑不住反复调优。
+    # 需要 `uv sync --extra local-embed`；只想要一个轻量默认值时可换 ollama 或 mock。
     LLM_PROVIDER: str = "ollama"
-    EMBEDDING_PROVIDER: str = "ollama"
+    EMBEDDING_PROVIDER: str = "sentence_transformers"
 
     # Ollama（本地，无需密钥）
     OLLAMA_BASE_URL: str = "http://localhost:11434"
@@ -96,13 +100,36 @@ class Settings(BaseSettings):
     # 对上下文很小的模型（如 512 token 的免费 embedding）显式截断可避免上游报错。
     EMBEDDING_MAX_INPUT_CHARS: int = 0
 
+    # ── 本地 embedding（sentence-transformers，可选 extra：uv sync --extra local-embed）──
+    # 为什么要有这一路：云端免费额度按**请求数**限流（有的网关只有 1000 次/天），
+    # 而全量建库一次就是几百次请求，反复调优根本不够用；本地跑还顺带去掉网络依赖与费用。
+    # 模型名走 Hugging Face 约定。默认选 Qwen3-Embedding-0.6B：1024 维、多语言、A100 上
+    # 全量建库只要分钟级，且小到能在 CPU 上跑（默认配置要能在任何机器上工作）。
+    # 追求更高精度时换成 Qwen/Qwen3-Embedding-4B 或 -8B 即可，只改这一行——维度随之变化，
+    # 必须重建索引（向量空间变了）。国内建议同时设 HF_ENDPOINT=https://hf-mirror.com。
+    SENTENCE_TRANSFORMERS_MODEL: str = "Qwen/Qwen3-Embedding-0.6B"
+    # auto 表示有 CUDA 就用 GPU（多卡时可用 cuda:0 / cuda:1 指定）
+    SENTENCE_TRANSFORMERS_DEVICE: str = "auto"
+    # 单次 encode 的样本数。显存不够时调小；CPU 上反而调大更划算。
+    SENTENCE_TRANSFORMERS_BATCH_SIZE: int = 32
+    # 归一化后内积等价于 cosine，与向量库的 cosine 空间口径一致，默认开启。
+    SENTENCE_TRANSFORMERS_NORMALIZE: bool = True
+    # 加载模型时是否允许联网（False = 只读本地缓存）。生产/离线环境应设为 False，
+    # 否则首启会静默去 Hugging Face 拉权重，把「本地模型」变成一次隐式下载。
+    SENTENCE_TRANSFORMERS_ALLOW_DOWNLOAD: bool = True
+    # Hugging Face 端点（空 = 官方）。国内设为 https://hf-mirror.com 可显著加速权重下载。
+    # 注意生效时机：huggingface_hub 在**导入时**就把端点读成模块级常量，所以这个值必须在
+    # import 之前写进 os.environ——由 providers/embeddings.py 在首次加载模型前负责，
+    # 写在 .env 里也能生效（不像普通环境变量那样需要手动 export）。
+    HF_ENDPOINT: str = ""
+
     # ── Vector store ───────────────────────────────────────────────────
     # 后端选择：zvec（默认，内嵌单进程）| chroma（旧数据兼容）
     VECTOR_STORE: str = "zvec"
     ZVEC_PATH: str = "./data/zvec_db"
-    # 仅当 VECTOR_STORE=chroma 时生效
+    # 仅当 VECTOR_STORE=chroma 时生效。注意 collection 名恒为 `kb_<id>`（每库一个），
+    # 因此没有「全局 collection 名」这个配置项——曾经有过一个，但从未被读取。
     CHROMA_PERSIST_DIR: str = "./data/chroma_db"
-    CHROMA_COLLECTION_NAME: str = "rag_documents"
 
     # ── File upload ────────────────────────────────────────────────────
     UPLOAD_DIR: str = "./data/uploads"
@@ -136,6 +163,20 @@ class Settings(BaseSettings):
     MAX_CONTEXT_LENGTH: int = 6000  # context 最大字符数
     HISTORY_MAX_MESSAGES: int = 20  # 送入模型的历史消息条数（最近 N 条）
 
+    # ── 检索质量（Phase 8）：两个默认关闭的插件点 ──────────────────────
+    # 精排：对粗排结果重排，决定「谁进 context」（RERANK_TOP_K 通常小于 TOP_K，
+    # 粗排 6–8 位会被整条丢掉）。none | lexical | llm，默认 none。
+    # 打开前必须在评测集上证明有提升（回归 >2pp 不允许合入，见 docs/evaluation.md 第 7 节）。
+    RERANK_BACKEND: str = "none"
+    RERANK_LLM_TOP_N: int = 12  # llm 后端一次送进模型的候选上限（控制 token 成本）
+    RERANK_LLM_SNIPPET_CHARS: int = 500  # llm 后端每条候选截取的字符数
+    # 查询改写：补一路平行查询抹平措辞差（别名 / 口语化提问）。
+    # none | alias | keywords | llm，默认 none；变体上限含原查询。
+    QUERY_REWRITE_BACKEND: str = "none"
+    QUERY_REWRITE_MAX_QUERIES: int = 3
+    # 别名表：`别名=正式名` 以逗号分隔，供 alias 改写器使用（如 Sakura=路明非）
+    QUERY_ALIASES: str = ""
+
     # ── Cache ──────────────────────────────────────────────────────────
     # 后端选择：memory（默认，进程内 LRU）| 第三方实现（注册 entry point 后填它的名字）
     CACHE_BACKEND: str = "memory"
@@ -146,6 +187,13 @@ class Settings(BaseSettings):
     # ── Async worker ───────────────────────────────────────────────────
     EMBEDDING_CONCURRENCY: int = 3
     EMBED_BATCH_SIZE: int = 20
+    # 单次 embedding 请求的超时与重试。免费/共享后端会限流或长时间不响应，
+    # 而 OpenAI 客户端的默认超时是 600s —— 不显式设小，一次抽风就是十分钟的静默挂起。
+    EMBEDDING_TIMEOUT: float = 60.0
+    EMBED_MAX_ATTEMPTS: int = 3
+    EMBED_RETRY_BACKOFF: float = 2.0
+    # 分批进度日志的间隔（批数）。批量超过该值才会打，避免小任务刷屏。
+    EMBED_PROGRESS_EVERY: int = 20
     # 后台任务队列：inprocess（默认，进程内 asyncio worker）| inline（同步执行）
     # | 第三方实现（注册 entry point 后填它的名字）
     TASK_QUEUE_BACKEND: str = "inprocess"

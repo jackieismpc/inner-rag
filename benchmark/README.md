@@ -22,7 +22,7 @@
 
 | 模式 | 数据 | 网络 | 指标含义 | 写 README / 落盘 |
 | --- | --- | --- | --- | --- |
-| `fixtures` | 仓库内 10 段短 fixture + mock embedding | 否 | 只验证**脚本与指标算得对** | **都不**（自检不是成绩，也不落盘噪声文件） |
+| `fixtures` | 仓库内 135 段短 fixture + mock embedding | 否 | 只验证**脚本与指标算得对** | **都不**（自检不是成绩，也不落盘噪声文件） |
 | `kb` | 本地 PDF 建好的真实知识库 | 需要 provider Key | 真实召回/引用/延迟（加 `--answer` 还有回答指标） | 是 |
 
 ## 常用命令
@@ -44,11 +44,28 @@ uv run python -m benchmark.run_bench --mode kb --kb-id 3 --strategy hybrid --thr
 # 阈值定标：一次未过滤检索反推整条阈值曲线（不花 LLM 的钱，只跑检索）
 uv run python -m benchmark.run_bench --mode kb --kb-id 3 --threshold-sweep
 uv run python -m benchmark.run_bench --mode kb --kb-id 3 --threshold-sweep 0,0.1,0.2,0.3
+
+# 小库跑全量评测集：引用页不在库中的题默认被跳过（否则它们全按 0 分计，指标变成在量拒答）
+uv run python -m benchmark.run_bench --mode kb --kb-id 3 --label "small/回归"
+uv run python -m benchmark.run_bench --mode kb --kb-id 3 --absent-items refuse --answer --label "small/拒答"
+uv run python -m benchmark.run_bench --mode kb --kb-id 3 --absent-items score   # 按未召回归零
 ```
 
 `--label` 会作为 README 表格里的「配置」列；不传则按 `kb<id>/<embedding>/<strategy>/k=<k>` 自动生成。
 **做实验务必显式传 `--label`**：行按「日期 + 配置」去重，配置相同就会覆盖上一行（对照行会丢）。
-其余参数：`--dataset`、`--fixtures-dir`、`--k`、`--out-dir`。
+其余参数：`--dataset`、`--fixtures-dir`、`--k`、`--out-dir`、`--absent-items`。
+
+`--absent-items` 决定「期望页不在这个库里」的题怎么处理（判据是库的**真实内容**——读分块元数据里的
+`page`，而不是建库脚本的页窗口常量，后者会随窗口调整过期）：
+
+| 取值 | 行为 | 什么时候用 |
+| --- | --- | --- |
+| `skip`（默认） | 跳过，不计入任何指标；终端与结果 JSON 分别报出「完全缺席」与「只进来部分引用页」两类 | 看检索质量。评测集照**全库**出题，丢给 227 页的小库时只有 10 条能完整命中，其余 125 条按 0 分计会同时压低 Recall 与页命中率，读起来像「检索变差了」 |
+| `refuse` | **改判为拒答题**（`expect_refusal=True`），进 `refusal_accuracy` 的分子分母 | 小库量**拒答能力**。「库里查不到答案的问题」在小库上天然成立，而且这正是真实分布（用户问什么不可控）——把它们摘掉等于浪费了一批现成场景。配 `--answer` 用 |
+| `score` | 照常参与，未召回记 0 | 跑全库时与 `skip` 等价（全库每题证据都在）；需要把它们算进「没答对」的分母时才用 |
+
+任何模式下，**「只进来部分引用页」的题都跳过**：证据只到一半，recall 上限被人为压到 1/2、1/3，
+模型据半份证据答对或答错都说明不了什么。
 
 `--threshold-sweep` 的原理：阈值过滤发生在 Top-k **之后**（`finalize_results` 先滤后排），
 所以一次 `threshold=0` 的召回就含全部信息——对任一阈值 t，丢掉 `score < t` 的条目再重算命中判定，
@@ -81,4 +98,8 @@ uv run python -m benchmark.run_bench --mode kb --kb-id 3 --threshold-sweep 0,0.1
 - **必须与建库时的 embedding 一致**：`kb.embedding_model` 与当前配置不一致时脚本直接报错并提示重建索引；
   换 embedding / 改 `CHUNK_SIZE` 后，指标不可与旧行直接比较。
 - **PDF 不入库**：`data/uploads/龙族.pdf` 只放在本地，缺 PDF 时锚点校验自动跳过（只做 schema 校验）。
-- **费用**：`--answer` 每题至少一次 LLM 调用，小库 9 题一次约几分钱；全库评测请只在里程碑时跑。
+- **费用**：`--answer` 每题至少一次 LLM 调用，用的是 `deepseek-flash`（按量计费、单价很低），
+  整份评测集跑一轮的费用可以忽略；建库这一侧换成**本机权重**之后也不再按次计费，所以
+  **全库 + 全量评测集是现在的默认评测方式**，不再是「只在里程碑才敢跑」。
+  小库留着跑快速回归（几十秒出数）与拒答验证——评测集的锚点覆盖全书，丢给小库只有 9 条能命中，
+  那 9 条之外的分数衡量的是拒答策略，不是检索质量（见 `docs/evaluation.md` 2.1）。

@@ -3,6 +3,9 @@
 本模块不依赖 inner_rag，也不要求存在 PDF：缺 PDF 时只做 schema 与 fixture 校验，
 这样 CI 与本地无网环境都能跑。有 PDF 时额外做「引用片段必须真的出现在该页」的校验，
 避免「评测集自己写错」被误判成模型答错。
+
+**读 PDF 一律走 `PageText`**（pypdf，与入库时的解析器同源）。另有 `gen_eval_fixtures.py`
+用它裁离线片段——两边共用同一个类，就不会再出现「校验用的文本」和「入库用的文本」是两回事。
 """
 
 from __future__ import annotations
@@ -13,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_DATASET = REPO_ROOT / "docs" / "datasets" / "dragon_king" / "eval_v1.jsonl"
+DEFAULT_DATASET = REPO_ROOT / "docs" / "datasets" / "dragon_king" / "eval_v3.jsonl"
 DEFAULT_FIXTURES = REPO_ROOT / "docs" / "datasets" / "dragon_king" / "fixtures"
 DEFAULT_PDF = REPO_ROOT / "data" / "uploads" / "龙族.pdf"
 
@@ -118,6 +121,36 @@ def load_fixtures(fixtures_dir: Path | str | None = None) -> list[dict[str, Any]
     return fixtures
 
 
+class PageText:
+    """按物理页号取 PDF 页文本（带缓存）。
+
+    **提取器必须与 `inner_rag.services.parser` 的 PDF 分支同源**——两边都用 ``pypdf`` 的
+    ``extract_text()``。理由是页码的「真值」来自入库分块：分块文本是 pypdf 提取的，页码也是
+    那时写下的。这里曾经用 pymupdf 的 ``get_text()``，两套提取器对同一页给出的文本并不相同
+    （实测源书 p9：pypdf 222 字 / pymupdf 184 字，断句位置也不同），于是「引用片段必须出现在
+    该页原文里」这条校验比对的是**另一份文本**，会把本来正确的题目判成锚点错误，而真正的
+    错题反而可能蒙混过关。`tests/test_benchmark_metrics.py` 有一条用例钉住这个一致性。
+    """
+
+    def __init__(self, pdf_path: Path | str) -> None:
+        from pypdf import PdfReader  # 只有真的要读 PDF 时才需要这个依赖
+
+        self._reader = PdfReader(str(pdf_path))
+        self._cache: dict[int, str] = {}
+
+    @property
+    def page_count(self) -> int:
+        return len(self._reader.pages)
+
+    def __call__(self, page: int) -> str:
+        if page not in self._cache:
+            if not 1 <= page <= self.page_count:
+                msg = f"页码 {page} 超出 1..{self.page_count}"
+                raise ValueError(msg)
+            self._cache[page] = (self._reader.pages[page - 1].extract_text() or "").strip()
+        return self._cache[page]
+
+
 def validate(
     items: list[dict[str, Any]],
     fixtures: list[dict[str, Any]],
@@ -136,24 +169,13 @@ def validate(
         problems.append(f"[skip] 未找到 PDF（{pdf}），已跳过原文锚点校验")
         return problems
 
-    import pymupdf  # 只有做锚点校验时才需要
-
-    doc = pymupdf.open(pdf)
-    pages: dict[int, str] = {}
-
-    def page_text(page: int) -> str:
-        if page not in pages:
-            if not 1 <= page <= doc.page_count:
-                msg = f"页码 {page} 超出 1..{doc.page_count}"
-                raise ValueError(msg)
-            pages[page] = doc[page - 1].get_text()
-        return pages[page]
+    reader = PageText(pdf)
 
     for item in items:
         for citation in item.get("citations", []):
             page = int(citation["page"])
             try:
-                text = page_text(page)
+                text = reader(page)
             except ValueError as exc:
                 problems.append(f"{item['id']}: {exc}")
                 continue
@@ -161,7 +183,11 @@ def validate(
                 problems.append(f"{item['id']}: 引用片段不在 p{page}：{citation['quote'][:24]}…")
 
     for fixture in fixtures:
-        text = page_text(int(fixture["page"]))
+        try:
+            text = reader(int(fixture["page"]))
+        except ValueError as exc:
+            problems.append(f"{fixture['fixture_id']}: {exc}")
+            continue
         if normalize(fixture["text"]) not in normalize(text):
             problems.append(f"{fixture['fixture_id']}: fixture 不是 p{fixture['page']} 原文子串")
     return problems

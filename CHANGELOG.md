@@ -23,6 +23,42 @@
 - **效果**必须能被复现或引用（跑过的命令、通过的用例数、评测指标、trace 链接等）。
 ---
 
+## [Phase 8.2/8.4] 2026-09-30 — 本地 GPU 嵌入落地：Qwen3-Embedding 替换 OpenRouter，全库 11138 分块全覆盖
+
+- 类型：优化 + 修复
+- 目的：云端 OpenRouter 免费路由按**请求数**限流（1000/天），全库建库要发 550+ 次请求，反复调优时
+  根本不够用；且免费 350m 模型只有 512 token 上下文，检索召回被截断拖累。换成本地部署的
+  Qwen3-Embedding-0.6B（1024 维、32k 上下文、无配额无费用），并让它在 A100 上跑 GPU 推理。
+- 方案：
+  - 新增 `SentenceTransformerEmbeddings`（`providers/embeddings.py`）：懒加载（构造器不碰权重）、
+    `_load()` 内 import（sentence-transformers 是可选 extra）、`threading.Lock` 串行化 GPU 推理；
+    query 侧在模型声明 `prompts` 时传 `prompt_name="query"` 激活 instruction 前缀；
+  - **CUDA 构建兼容性（本次最深的坑）**：PyPI 默认 torch 已是 cu13x 构建，而驱动 535（CUDA 12.2）
+    不支持 → `torch.cuda.is_available()=False`，且 PyTorch 只在 stderr 打一次 UserWarning。
+    修法：`pyproject.toml` 加 `[[tool.uv.index]] pytorch-cu124` + `[tool.uv.sources] torch = { index = ... }`
+    + pin `torch>=2.6,<2.7`。`_resolve_device()` 在 CUDA 不可用时**退回 CPU 并告警写清华因**，
+    而不是抛错（「任何单点问题都不该让整体流程失败」）；
+  - **多卡选卡**：共享机器上 GPU 0 可能被占满，本地嵌入默认落 GPU 0 会 `CUDA out of memory`。
+    用 `CUDA_VISIBLE_DEVICES=<空闲卡>` 选卡；坑在 `nohup` 会吞掉前缀赋值，须写
+    `nohup env CUDA_VISIBLE_DEVICES=3 uv run ...`（见 operations.md §3）；
+  - **修复全量覆盖 bug**：`_parse_meta` 的 `page_count`（段落数 11138）被误当「最大页号」切 full 窗口，
+    导致末尾 27 页正文（页号 11139-11165，路山彦决战/尾声/校长等核心剧情）漏入库。拆出 `max_page`
+    （最大物理页号 11165）供 `resolve_windows('full', ...)` 使用——空页被解析跳过、页号稀疏，
+    窗口必须覆盖到最大页号而非段落数。补回归用例 `test_parse_meta_distinguishes_max_page_from_page_count`。
+- 效果：
+  - `torch 2.6.0+cu124`、`cuda.is_available()=True`、4×A100 可见；语义区分度 +0.326（相关 0.5955 vs 无关 0.2698）；
+  - 全库重建 **11138 分块 / 66.5s**（覆盖全部非空页，末尾 27 页核验已入库），小库 227 分块 / 21s；
+  - **新基线（全库 / 本地 Qwen / hybrid / k=8 / 146 题）**：Recall@8=79.3%、MRR=0.565、页命中率 78.5%、
+    **检索 p50=123.8ms**（对比旧 openrouter 350m 小库 p50=1238.6ms，快 10 倍且免费）；
+  - 质量门禁：ruff check/format 通过、mypy 59 源文件无问题、pytest **368 passed**；
+    修正过时用例 `test_resolve_windows_small_covers_all_anchor_pages` → `_covers_v1_anchor_pages`
+    （评测集演进到 v3 后，小库本就不该覆盖全库锚点）；
+  - 清理：删除 macOS `tar` 推送带入的 8 个 AppleDouble 残留（`._*.py`/`._*.md`，ruff 报 E902），
+    以及根目录 3 个历史推送失误副本（`evaluation.md`/`operations.md`/`usage.md`）。
+- 涉及提交：本条目所在提交（Phase 8.2/8.4：本地 Qwen 嵌入 + 全库全覆盖修复 + 评测集 v3 扩容 + 失败题定位）
+
+---
+
 ## [Phase 8.1] 2026-09-30 — 检索质量提升：阈值不是瓶颈，补一路词面召回（向量 ∪ BM25）
 
 - 类型：优化 + 新增功能

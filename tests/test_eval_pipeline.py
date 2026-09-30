@@ -6,7 +6,9 @@
 * 页区间命中判定（Recall / MRR / 引用精度）；
 * 分块元数据确实带上 page_start / page_end；
 * 建库脚本的页窗口与 manifest 字段；
-* judge 输出解析（外部模型的输出不保证干净）与失败归因。
+* judge 输出解析（外部模型的输出不保证干净）与失败归因；
+* **答案保密**：跑完整链路并捕获发给答题模型的每一个 prompt，断言参考答案不在里面
+  （见 docs/evaluation.md 2.4）——只要模型能看到答案，「正确率」这个数字就失去意义。
 """
 
 from __future__ import annotations
@@ -14,10 +16,13 @@ from __future__ import annotations
 import importlib.util
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from langchain_core.documents import Document
+from langchain_core.messages import AIMessage
+from langchain_core.runnables import RunnableLambda
 
 from benchmark import langsmith_sync, metrics
 from inner_rag.services.vector_store.base import CHUNK_METADATA_FIELDS, page_span, prepare_chunks
@@ -121,17 +126,25 @@ def test_page_span_falls_back_to_single_page() -> None:
 # ── 建库脚本（纯函数部分） ──────────────────────────────────────────────
 
 
-def test_resolve_windows_small_covers_all_anchor_pages() -> None:
-    """小库必须覆盖评测集里的每一个锚点页，否则该题必然「检索失败」而被误判为模型差。"""
+def test_resolve_windows_small_covers_v1_anchor_pages() -> None:
+    """小库窗口（``ANCHOR_WINDOWS``）必须覆盖 v1 首发题的全部锚点页。
+
+    ``ANCHOR_WINDOWS`` 的设计依据就是 v1 那 9 条手工题（锚点 + 前后 ±2 页上下文），
+    它只负责「小库 = 回归 + 拒答」的定位。评测集已演进到 v3（146 条、覆盖全书
+    11,000+ 页），锚点遍布整本书，**全库才是主评测场地**——小库本就不该覆盖它们。
+    所以这里只守 v1 锚点，v3 的全库覆盖由「重建全库」与 ``run_bench --mode kb``
+    保证（见 docs/evaluation.md 2.1）。
+    """
     from benchmark import dataset as ds
 
-    items = ds.load_eval_set()
+    v1 = REPO_ROOT / "docs" / "datasets" / "dragon_king" / "eval_v1.jsonl"
+    items = ds.load_eval_set(v1)
     windows = build_eval_kb.resolve_windows("small")
     covered = set(build_eval_kb.window_pages(windows))
     anchors = {page for item in items for page in ds.expected_pages(item)}
-    assert anchors, "评测集至少要有一个锚点页"
+    assert anchors, "v1 评测集至少要有一个锚点页"
     missing = sorted(anchors - covered)
-    assert not missing, f"小库页窗口漏掉锚点页：{missing}"
+    assert not missing, f"小库页窗口漏掉 v1 锚点页：{missing}"
 
 
 def test_window_pages_validates_and_dedups() -> None:
@@ -146,6 +159,24 @@ def test_resolve_windows_full_needs_total_pages() -> None:
         build_eval_kb.resolve_windows("full")
     with pytest.raises(ValueError, match="未知 profile"):
         build_eval_kb.resolve_windows("tiny")
+
+
+def test_parse_meta_distinguishes_max_page_from_page_count() -> None:
+    """``page_count``（段落数）与 ``max_page``（最大物理页号）必须分离。
+
+    解析会跳过空页，所以物理页号是稀疏的：一本 11165 页的书可能只有 11138 个非空段落，
+    最大页号是 11165。full 窗口必须覆盖到 11165，否则末尾「页号 > 段落数」的正文页
+    会被 ``select_pages`` 漏掉（实测龙族因此漏了末尾 27 页核心剧情）。
+    """
+    docs = [
+        Document(page_content="正文", metadata={"page": 2}),
+        Document(page_content="正文", metadata={"page": 11165}),
+    ]
+    meta = build_eval_kb._parse_meta(Path("x.pdf"), docs)
+
+    assert meta["page_count"] == 2  # 两个非空段落
+    assert meta["max_page"] == 11165  # 最大物理页号
+    assert meta["max_page"] >= meta["page_count"]
 
 
 def test_build_manifest_has_comparable_fields() -> None:
@@ -382,3 +413,137 @@ def test_select_pages_keeps_source_page_numbers() -> None:
     assert [doc.metadata["page"] for doc in selected] == [5904, 6079]
     with pytest.raises(ValueError, match="一页都没命中"):
         build_eval_kb.select_pages(documents, {1})
+
+
+# ── 答案保密 ────────────────────────────────────────────────────────────
+
+# 参考资料的「秘密串」：用明显不可能出现在语料里的字面量，命中即可判定泄漏
+SECRET_ANSWER = "SECRET-ANSWER-路明非是卡塞尔学院的学生"
+SECRET_KEYWORD = "SECRET-KEYWORD-诺玛"
+SECRET_FORBIDDEN = "SECRET-FORBIDDEN-上杉绘梨衣"
+
+
+def _prompt_text(payload: Any) -> str:
+    """把发给模型的载荷摊平成一个字符串（ChatPromptValue / Message 列表 / 裸串都兜住）。"""
+    if hasattr(payload, "to_string"):
+        return str(payload.to_string())
+    if isinstance(payload, list):
+        return "\n".join(str(getattr(message, "content", message)) for message in payload)
+    return str(payload)
+
+
+async def test_answer_llm_never_sees_reference_answer(client, kb: dict) -> None:
+    """评测链路不得把参考答案交给**答题模型**。
+
+    为什么这条必须是断言而不是约定：只要答题模型能看到 `expected_answer`，
+    「正确率」就变成「抄写能力」的度量，整张评测表都失去意义。所以这里跑一次真实的
+    `run_bench.run_kb(--answer)`，在模型边界上捕获**每一个** prompt，
+    断言参考答案、关键词、禁止词一个都没出现。
+
+    注意边界：judge 模型**需要**看到参考答案才能判对错（见 docs/evaluation.md 2.4），
+    那是独立的一次调用，不在这条链路里。
+    """
+    response = client.post(
+        "/api/doc/upload",
+        data={"kb_id": str(kb["id"])},
+        files={
+            "files": (
+                "corpus.txt",
+                "路明非是卡塞尔学院的学生，他的导师是古德里安教授。".encode(),
+                "text/plain",
+            )
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    from benchmark import run_bench
+    from inner_rag.services.rag import rag_service
+
+    prompts: list[str] = []
+
+    def capturing_llm() -> RunnableLambda:
+        def invoke(payload: Any) -> AIMessage:
+            prompts.append(_prompt_text(payload))
+            return AIMessage(content="这是一段与参考答案无关的模型输出。")
+
+        return RunnableLambda(invoke)
+
+    # 直接换掉 rag_service 取模型的那一步：捕获的是**真正发给模型的东西**，
+    # 而不是我们对调用点的印象。
+    rag_service._get_llm = capturing_llm  # type: ignore[method-assign]
+
+    item = {
+        "id": "leak-probe",
+        "question": "路明非是谁？",
+        "category": "fact",
+        "expected_answer": SECRET_ANSWER,
+        "answer_keywords": [SECRET_KEYWORD],
+        "must_not_include": [SECRET_FORBIDDEN],
+        "citations": [],
+        "expect_refusal": False,
+    }
+    args = SimpleNamespace(
+        kb_id=kb["id"], k=4, strategy="hybrid", threshold=0.0, answer=True, update_readme=False
+    )
+    results = await run_bench.run_kb(args, [item])
+
+    assert prompts, "没有捕获到任何 prompt：用例前提不成立（答题模型没被调用）"
+    blob = "\n".join(prompts)
+    for secret, label in (
+        (SECRET_ANSWER, "expected_answer"),
+        (SECRET_KEYWORD, "answer_keywords"),
+        (SECRET_FORBIDDEN, "must_not_include"),
+    ):
+        assert secret not in blob, f"{label} 泄漏进了答题 prompt"
+
+    # 语料本身当然要出现（否则这条用例测的是「什么都没发」而不是「答案没发」）
+    assert "古德里安" in blob
+    assert results[0]["answer"] == "这是一段与参考答案无关的模型输出。"
+
+
+async def test_answer_llm_prompt_still_contains_retrieved_context(client, kb: dict) -> None:
+    """上一条用例的反面：同一份 prompt 里**必须**有召回到的正文，否则它可能只是空跑。"""
+    response = client.post(
+        "/api/doc/upload",
+        data={"kb_id": str(kb["id"])},
+        files={
+            "files": (
+                "context.txt",
+                "绘梨衣的言灵是「审判」，她很少说话。".encode(),
+                "text/plain",
+            )
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    from benchmark import run_bench
+    from inner_rag.services.rag import rag_service
+
+    prompts: list[str] = []
+
+    def capturing_llm() -> RunnableLambda:
+        def invoke(payload: Any) -> AIMessage:
+            prompts.append(_prompt_text(payload))
+            return AIMessage(content="ok")
+
+        return RunnableLambda(invoke)
+
+    rag_service._get_llm = capturing_llm  # type: ignore[method-assign]
+
+    item = {
+        "id": "context-probe",
+        "question": "绘梨衣的言灵是什么？",
+        "category": "fact",
+        "expected_answer": "审判",
+        "answer_keywords": ["审判"],
+        "citations": [],
+        "expect_refusal": False,
+    }
+    args = SimpleNamespace(
+        kb_id=kb["id"], k=4, strategy="hybrid", threshold=0.0, answer=True, update_readme=False
+    )
+    await run_bench.run_kb(args, [item])
+
+    assert prompts
+    assert "绘梨衣" in prompts[0]
+    assert "审判" in prompts[0]

@@ -126,7 +126,17 @@ def test_configured_name_reads_settings(monkeypatch: pytest.MonkeyPatch) -> None
 def test_plugin_status_covers_every_registry() -> None:
     report = plugin_status()
     assert set(report) == {registry.key for registry in ALL_REGISTRIES}
-    assert set(report) == {"chat", "embedding", "vector_store", "cache", "task_queue"}
+    # 显式列出全部插件点：这行才能抓住「某个 registry 从 ALL_REGISTRIES 里被删掉」，
+    # 光比对 ALL_REGISTRIES 自身抓不住（两边一起少，断言照样过）。
+    assert set(report) == {
+        "chat",
+        "embedding",
+        "vector_store",
+        "cache",
+        "task_queue",
+        "rerank",
+        "query_rewrite",
+    }
 
     vector_store = report["vector_store"]
     assert vector_store["settings_key"] == "VECTOR_STORE"
@@ -136,10 +146,11 @@ def test_plugin_status_covers_every_registry() -> None:
     assert vector_store["entry_point_group"] == "inner_rag.vector_stores"
     assert vector_store["third_party"] == []
 
-    # 每个插件点的配置项都真实存在（写错配置项名会让 active 永远为 False）
+    # 每个插件点的配置项都真实存在（写错配置项名会让 active 永远为 False），
+    # 且至少注册了一个实现（注册语句在实现模块的导入期执行，所以这条也在守「模块被导入了吗」）
     for entry in report.values():
         assert hasattr(settings, entry["settings_key"]), entry["settings_key"]
-        assert entry["available"]
+        assert entry["available"], f"{entry['settings_key']} 没有任何已注册实现"
 
 
 # ── 端到端：不改业务代码地接入一个第三方 provider ──────────────────────
@@ -194,10 +205,20 @@ def test_plugins_endpoint_reports_every_plugin_point(client: TestClient) -> None
     assert response.status_code == 200, response.text
     data = response.json()["data"]
 
-    assert set(data) == {"chat", "embedding", "vector_store", "cache", "task_queue"}
+    assert set(data) == {
+        "chat",
+        "embedding",
+        "vector_store",
+        "cache",
+        "task_queue",
+        "rerank",
+        "query_rewrite",
+    }
     assert data["vector_store"]["configured"] == settings.VECTOR_STORE.strip().lower()
     assert data["cache"]["configured"] == settings.CACHE_BACKEND.strip().lower()
     assert data["task_queue"]["configured"] == settings.TASK_QUEUE_BACKEND.strip().lower()
+    assert data["rerank"]["configured"] == settings.RERANK_BACKEND.strip().lower()
+    assert data["query_rewrite"]["configured"] == settings.QUERY_REWRITE_BACKEND.strip().lower()
     assert all(item["active"] for item in data.values())
     # 前端要展示「有哪些后端可选」，所以列表必须非空
     assert all(item["available"] for item in data.values())
@@ -211,6 +232,14 @@ def test_health_reflects_plugin_status(client: TestClient) -> None:
     """health 的 status 要把「插件点配置写错」也算进降级，而不是只看 provider 探活。"""
     body = client.get("/api/system/health", params={"probe": "false"}).json()
     plugins = body["plugins"]
-    assert set(plugins) == {"chat", "embedding", "vector_store", "cache", "task_queue"}
+    assert set(plugins) == {
+        "chat",
+        "embedding",
+        "vector_store",
+        "cache",
+        "task_queue",
+        "rerank",
+        "query_rewrite",
+    }
     assert all(item["active"] for item in plugins.values())
     assert body["status"] in {"healthy", "degraded"}

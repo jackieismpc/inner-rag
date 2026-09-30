@@ -147,13 +147,63 @@ class EmbeddingService(Embeddings):
             return vector
 
     async def _embed_in_batches(self, texts: list[str]) -> list[list[float]]:
-        result: list[list[float]] = []
+        """分批**并发**嵌入：并发上限由 ``EMBEDDING_CONCURRENCY`` 决定，失败按批重试。
+
+        两条容易踩的坑，都在这里处理掉：
+
+        1. **并发上限必须真的生效**：早期实现是 `for batch: async with semaphore: await ...`，
+           每一批都在等上一批返回，信号量形同虚设，入库吞吐被单次往返时间锁死
+           （11165 页的全库要跑成小时级）。改成「一次派发全部批次 + 信号量限流 + 按下标回填」后，
+           真实并发等于配置值，输出顺序仍与输入严格一致；
+        2. **单批失败必须能重试，且不能拖住其它批**：免费/共享 embedding 后端会偶发 429 与超时。
+           失败时若直接让异常穿透 ``gather``，**其余未完成的批次会继续在后台跑**——
+           调用方以为已经失败并重试，实际两轮请求叠在一起，既打满额度又让状态无法解释。
+           所以这里：单批指数退避重试；重试仍失败则取消所有兄弟任务并抛出。
+
+        批量大时按 ``EMBED_PROGRESS_EVERY`` 打进度：全库入库是分钟级任务，
+        没有进度日志就只能靠猜（OpenAI 客户端默认 600s 超时那种挂起尤其难查）。
+        """
         batch_size = settings.EMBED_BATCH_SIZE
-        for start in range(0, len(texts), batch_size):
-            batch = texts[start : start + batch_size]
-            async with self._get_semaphore():
-                result.extend(await self.embeddings.aembed_documents(batch))
-        return result
+        batches = [texts[start : start + batch_size] for start in range(0, len(texts), batch_size)]
+        if not batches:
+            return []
+
+        semaphore = self._get_semaphore()
+        max_attempts = max(1, settings.EMBED_MAX_ATTEMPTS)
+        report_every = max(1, settings.EMBED_PROGRESS_EVERY)
+        verbose = len(batches) >= report_every
+        done = 0
+
+        async def embed_batch(batch: list[str]) -> list[list[float]]:
+            nonlocal done
+            last_error: Exception | None = None
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    async with semaphore:
+                        vectors = await self.embeddings.aembed_documents(batch)
+                except Exception as exc:  # 上游抖动：退避后重试同一批
+                    last_error = exc
+                    if attempt < max_attempts:
+                        await asyncio.sleep(settings.EMBED_RETRY_BACKOFF * attempt)
+                    continue
+                done += 1
+                if verbose and (done % report_every == 0 or done == len(batches)):
+                    logger.info(f"[EMBED] 分批进度 {done}/{len(batches)}")
+                return vectors
+            assert last_error is not None  # 只有全部尝试都失败才会走到这里
+            raise last_error
+
+        tasks = [asyncio.create_task(embed_batch(batch)) for batch in batches]
+        try:
+            results = await asyncio.gather(*tasks)
+        except BaseException:
+            # 一批彻底失败就取消其余：让「失败」这件事对调用方是确定且可重试的
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        # gather 保序：结果顺序与 batches 一致，因此与 texts 一致
+        return [vector for batch_result in results for vector in batch_result]
 
 
 embedding_service = EmbeddingService()

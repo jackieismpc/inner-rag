@@ -58,6 +58,25 @@ dependencies = [
 [project.optional-dependencies]
 # Local OCR is opt-in; the OCR backend is pluggable (see inner_rag/services/ocr.py).
 ocr-paddle = ["paddleocr>=3.7.0", "paddlepaddle>=3.3.1"]
+# Local (on-premise) embedding backend is opt-in too: torch + sentence-transformers are heavy
+# (~2.5 GB), and most deployments just use a cloud embedding API. Needed only when you set
+# EMBEDDING_PROVIDER=sentence_transformers — see docs/configuration.md.
+# torch is pinned to the CUDA 12.4 index below, NOT because 12.4 is special, but because a
+# wheel's bundled CUDA runtime must not be newer than what the machine's **driver** supports
+# (PyPI's default torch is now a cu13x build, which fails on the driver-12.2 machines we deploy to).
+local-embed = ["sentence-transformers>=3.3.0", "torch>=2.6,<2.7"]
+
+# torch 的 CUDA 变体由 index 决定（PyPI 默认给的是 cu13x 构建）。显式指定是为了可复现：
+# 镜像里装的 CUDA runtime 不能新于宿主机驱动支持的版本，否则 `torch.cuda.is_available()`
+# 会是 False，而错误信息只在警告里出现一次（很容易漏看）。
+# 换机器时改这个 URL 即可：驱动 >= 580 用 cu130，>= 560 用 cu129，>= 550 用 cu128/cu126。
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu124" }
 
 [dependency-groups]
 dev = [

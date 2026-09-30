@@ -37,11 +37,16 @@ CHAT = "chat"
 EMBEDDING = "embedding"
 
 ALIASES: dict[str, str] = {
+    # 注意：`local` 历史上指 ollama（本地服务），保留原义不改——静默换义会让已有
+    # `.env` 指向另一个向量空间。真正「进程内」的本地后端用 `sentence_transformers`。
     "local": "ollama",
     "oai": "openai",
     "open-router": "openrouter",
     "fake": "mock",
     "test": "mock",
+    "st": "sentence_transformers",
+    "sbert": "sentence_transformers",
+    "sentence-transformers": "sentence_transformers",
 }
 
 
@@ -205,6 +210,21 @@ def _openai_embedding() -> ProviderSpec:
     )
 
 
+def _sentence_transformers_embedding() -> ProviderSpec:
+    return ProviderSpec(
+        name="sentence_transformers",
+        label="本地模型（sentence-transformers，进程内）",
+        kind=EMBEDDING,
+        model=settings.SENTENCE_TRANSFORMERS_MODEL,
+        docs_url="https://sbert.net",
+        notes=(
+            "进程内直接加载权重，无配额、无费用、不依赖网络；"
+            "需要可选依赖：uv sync --extra local-embed。"
+            "国内下载权重建议同时设 HF_ENDPOINT=https://hf-mirror.com"
+        ),
+    )
+
+
 def _mock_embedding() -> ProviderSpec:
     return ProviderSpec(
         name="mock",
@@ -229,6 +249,7 @@ _EMBEDDING_SPECS: dict[str, Callable[[], ProviderSpec]] = {
     "ollama": _ollama_embedding,
     "openrouter": _openrouter_embedding,
     "openai": _openai_embedding,
+    "sentence_transformers": _sentence_transformers_embedding,
     "mock": _mock_embedding,
 }
 
@@ -260,6 +281,16 @@ def _ensure_builtins() -> None:
 
     chat_providers.load_entry_points()
     embedding_providers.load_entry_points()
+
+
+def ensure_builtin_providers() -> None:
+    """注册内置 provider（幂等），并把第三方实现一并发现。
+
+    供**插件状态接口**在报数前显式调用：``available`` 是否完整不能取决于「本进程此前有没有
+    解析过 provider」，否则 ``is_active()`` 会跟着变成 False，健康检查就会误报降级。
+    解析路径（``_resolve``）自己也会调用它，两处共用同一份幂等实现。
+    """
+    _ensure_builtins()
 
 
 # ── 解析与校验 ────────────────────────────────────────────────────────

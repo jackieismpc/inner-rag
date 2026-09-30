@@ -22,11 +22,12 @@ from loguru import logger
 from inner_rag.core.config import settings
 from inner_rag.services.embedding import embedding_service
 from inner_rag.services.vector_store.base import (
-    WRITE_BATCH_SIZE,
     Strategy,
     distance_to_relevance,
+    embed_batches_in_order,
     finalize_results,
     merge_hybrid,
+    normalized_chunk_key,
     prepare_chunks,
     resolve_search_defaults,
 )
@@ -77,27 +78,49 @@ class ChromaVectorStore:
             logger.warning(f"[VECTOR_STORE] doc_id={doc_id} 未产生任何有效分块")
             return 0
 
-        texts = [chunk.page_content for chunk in chunks]
-        started = time.perf_counter()
-        # 先异步批量嵌入：结果进入 EmbeddingCache，随后 Chroma 内部再次嵌入时直接命中缓存
-        await embedding_service.aembed_documents(texts)
-        logger.info(
-            f"[EMBED] doc_id={doc_id} | chunks={len(chunks)} | "
-            f"embed_time={(time.perf_counter() - started) * 1000:.1f}ms"
-        )
+        stored = self.stored_chunk_keys(kb_id, doc_id)
+        pending = [chunk for chunk in chunks if normalized_chunk_key(chunk) not in stored]
+        skipped = len(chunks) - len(pending)
+        if not pending:
+            logger.info(
+                f"[VECTOR_STORE] doc_id={doc_id} {len(chunks)} 个分块全部已在库中，无需重复入库"
+            )
+            return 0
+        if skipped:
+            logger.info(f"[VECTOR_STORE] doc_id={doc_id} 跳过已入库的 {skipped} 个分块，续跑")
 
         store = self._get_store(kb_id)
-        for start in range(0, len(chunks), WRITE_BATCH_SIZE):
-            batch = chunks[start : start + WRITE_BATCH_SIZE]
-            # Chroma 侧 id 用随机 uuid：重跑入库前必须先 delete_document，否则分块会累积
+        started = time.perf_counter()
+        written = 0
+        async for batch, vectors in embed_batches_in_order(pending):
+            # 直接传已算好的向量：Chroma 内部的 embedding_function 也就不用再跑一遍
             ids = [uuid.uuid4().hex for _ in batch]
-            await asyncio.to_thread(store.add_documents, batch, ids=ids)
+            await asyncio.to_thread(store.add_documents, batch, ids=ids, embeddings=vectors)
+            written += len(batch)
 
         logger.info(
-            f"[VECTOR_STORE] 写入 kb={kb_id} doc_id={doc_id} "
-            f"filename={filename} chunks={len(chunks)}"
+            f"[EMBED] doc_id={doc_id} | chunks={written} | skipped={skipped} | "
+            f"embed+write_time={(time.perf_counter() - started) * 1000:.1f}ms"
         )
-        return len(chunks)
+        logger.info(
+            f"[VECTOR_STORE] 写入 kb={kb_id} doc_id={doc_id} filename={filename} chunks={written}"
+        )
+        return written
+
+    def stored_chunk_keys(self, kb_id: int, doc_id: int) -> set[tuple[str, str]]:
+        target = str(doc_id)
+        try:
+            # Chroma 的 id 是随机 uuid，所以只能在元数据上按 doc_id 过滤（doc_id 有倒排索引）
+            result = (
+                self._get_client()
+                .get_collection(self._collection_name(kb_id))
+                .get(where={"doc_id": target}, include=["metadatas"])
+            )
+        except Exception as exc:  # 从未入库过的知识库没有 collection，等价于「一个都没有」
+            logger.debug(f"[VECTOR_STORE] 读取已入库分块失败（按未入库处理）kb={kb_id}: {exc}")
+            return set()
+        metadatas = result.get("metadatas") or []
+        return {(target, str(meta.get("chunk_index"))) for meta in metadatas if meta}
 
     # ── 检索 ───────────────────────────────────────────────────────────
 

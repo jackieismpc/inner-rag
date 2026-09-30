@@ -185,7 +185,7 @@ LangSmith 开着时，span 的计时日志降到 DEBUG（trace 里有耗时）�
 | 2 | 同一次请求的日志能用 `request_id` 串起来，`LOG_FORMAT=json` 时每行都能 `json.loads` | `test_json_log_lines_are_parseable`、`test_request_id_matches_between_response_and_logs`、`test_request_id_is_passed_through` | ✅ |
 | 3 | `LANGSMITH_TRACING=false`（默认）时零网络调用 | `test_no_network_when_tracing_disabled`：monkeypatch `httpx` 的两个 transport 为「一调用即抛」，跑完整问答仍 200 | ✅ |
 | 4 | 追踪上报失败不影响接口成功率 | `test_tracing_upload_failure_does_not_break_request`：注入必然失败的 `_upload`，断言请求 200 且 `tracing_errors_total` 计数 | ✅ |
-| 5 | `.env.example`、README「可观测性」小节、本文件三者一致 | 人工核对三处配置项与指标清单 | ✅ |
+| 5 | `.env.example`、本文件、`docs/configuration.md` 三者配置项一致 | 人工核对三处配置项与指标清单 | ✅ |
 
 ### 6.1 密钥怎么给：只走环境变量，不写进仓库文件
 

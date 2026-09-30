@@ -26,18 +26,18 @@ from langchain_core.documents import Document
 
 from inner_rag.services.embedding import embedding_service
 from inner_rag.services.vector_store.base import (
+    ChunkKey,
     Strategy,
     cosine_similarity,
     distance_to_relevance,
+    embed_batches_in_order,
     finalize_results,
     maximal_marginal_relevance,
     merge_hybrid,
+    normalized_chunk_key,
     prepare_chunks,
     resolve_search_defaults,
 )
-
-# 分块在库内的唯一键：与 zvec 的 id 口径一致（kb_id 由外层的 bucket 表达）
-ChunkKey = tuple[str, str]
 
 
 @dataclass
@@ -65,18 +65,29 @@ class MemoryVectorStore:
         if not chunks:
             return 0
 
-        vectors = await embedding_service.aembed_documents([chunk.page_content for chunk in chunks])
+        # 断点续跑：确定性 key 让「已入库」可判定，重跑只补缺失的分块
+        stored = self.stored_chunk_keys(kb_id, doc_id)
+        pending = [chunk for chunk in chunks if normalized_chunk_key(chunk) not in stored]
+        if not pending:
+            return 0
+
         bucket = self._kbs.setdefault(kb_id, {})
-        for chunk, vector in zip(chunks, vectors, strict=True):
-            key: ChunkKey = (str(chunk.metadata["doc_id"]), str(chunk.metadata["chunk_index"]))
-            # 用确定性 key 覆盖写：重跑入库（失败重试）不会累积重复分块
-            bucket[key] = _StoredChunk(
-                doc_id=key[0],
-                chunk_index=key[1],
-                document=chunk,
-                vector=list(vector),
-            )
-        return len(chunks)
+        written = 0
+        async for batch, vectors in embed_batches_in_order(pending):
+            for chunk, vector in zip(batch, vectors, strict=True):
+                key = normalized_chunk_key(chunk)
+                bucket[key] = _StoredChunk(
+                    doc_id=key[0],
+                    chunk_index=key[1],
+                    document=chunk,
+                    vector=list(vector),
+                )
+            written += len(batch)
+        return written
+
+    def stored_chunk_keys(self, kb_id: int, doc_id: int) -> set[tuple[str, str]]:
+        target = str(doc_id)
+        return {key for key in self._kbs.get(kb_id, {}) if key[0] == target}
 
     # ── 检索 ───────────────────────────────────────────────────────────
 

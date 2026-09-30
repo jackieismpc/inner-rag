@@ -23,7 +23,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import math
+from collections.abc import AsyncIterator
 from typing import Literal, Protocol
 
 from langchain_core.documents import Document
@@ -31,11 +33,12 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from loguru import logger
 
 from inner_rag.core.config import settings
+from inner_rag.services.embedding import embedding_service
 
 Strategy = Literal["similarity", "mmr", "hybrid"]
 
-# 写入分批大小：控制单次 native 调用的内存占用与超时粒度
-WRITE_BATCH_SIZE = 50
+# 分块在库内的唯一键：(doc_id, chunk_index)。三个后端的「已入库」判定与融合去重共用它。
+ChunkKey = tuple[str, str]
 
 # 写入向量库的分块元数据白名单。解析器还会附带 source / sheet / ocr 等字段，
 # 但下游（context 组装、混合检索去重）只消费这些；向量库 schema 也只声明这些字段。
@@ -101,6 +104,52 @@ def chunk_key(doc: Document) -> tuple[str | None, str | None]:
     return doc.metadata.get("doc_id"), doc.metadata.get("chunk_index")
 
 
+def normalized_chunk_key(doc: Document) -> tuple[str, str]:
+    """``chunk_key`` 的字符串化版本，用于**跨后端比较**「这块是否已入库」。
+
+    ``chunk_index`` 在元数据里可能是 int（内存后端直接存了切片下标）也可能是 str
+    （zvec 的 schema 把它声明成 STRING），比较前统一转字符串，否则「已入库」会被判成
+    「没有」，续跑时白跑一遍。
+    """
+    doc_id, chunk_index = chunk_key(doc)
+    return str(doc_id), str(chunk_index)
+
+
+async def embed_batches_in_order(
+    chunks: list[Document],
+) -> AsyncIterator[tuple[list[Document], list[list[float]]]]:
+    """分批嵌入并**按输入顺序**逐批交出 ``(分块, 向量)``，供调用方边算边落库。
+
+    为什么不能「全部算完再写」：一份 1.1 万分块的文档要 500+ 批，整份算完才写的话，
+    任何一批失败（429 / 超时 / 进程被杀）都会让**已经算好的几百批全部作废**——重跑一次就是
+    几十分钟。改成逐批交出、逐批落库后，最坏情况只丢「在途的那几批」。
+
+    这里保留原有的并发语义：所有批次一次性派发，由 ``embedding_service`` 内部的信号量把
+    真实并发压到 ``EMBEDDING_CONCURRENCY``；再按顺序 ``await``，于是**吞吐不打折、顺序有保证**。
+    所以「逐批落库」付出的代价只是「最多丢 N 批」（N = 并发上限），而不是把并发退回串行。
+    """
+    if not chunks:
+        return
+    batch_size = max(1, settings.EMBED_BATCH_SIZE)
+    batches = [chunks[i : i + batch_size] for i in range(0, len(chunks), batch_size)]
+
+    tasks = [
+        asyncio.create_task(
+            embedding_service.aembed_documents([chunk.page_content for chunk in batch])
+        )
+        for batch in batches
+    ]
+    try:
+        for batch, task in zip(batches, tasks, strict=True):
+            yield batch, await task
+    finally:
+        # 调用方中途退出（异常 / 取消）时，别把兄弟批次留在后台继续烧配额
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+
 def page_span(doc: Document) -> tuple[int, int] | None:
     """分块覆盖的页区间 ``(start, end)``：闭区间、1-based 物理页；没有页码信息返回 None。
 
@@ -163,7 +212,19 @@ class VectorStore(Protocol):
     async def add_documents(
         self, kb_id: int, documents: list[Document], doc_id: int, filename: str
     ) -> int:
-        """分块 + 嵌入 + 写入，返回写入的分块数（没有有效分块时返回 0）。"""
+        """分块 + 嵌入 + 写入，返回**本次新写入**的分块数（没有有效分块时返回 0）。
+
+        实现必须做到**幂等且可续跑**：已经在本库里的分块要跳过（见 ``stored_chunk_keys``），
+        并且要边嵌入边落库——否则一份大文档算到一半失败就前功尽弃。
+        """
+        ...
+
+    def stored_chunk_keys(self, kb_id: int, doc_id: int) -> set[tuple[str, str]]:
+        """该文档已经入库的分块键集合（``(doc_id, chunk_index)``）。
+
+        这是「断点续跑」的进度来源：不需要额外的进度文件，向量库自己就是那个进度文件；
+        重跑入库时按它跳过已完成的批次，断在哪就从哪继续。
+        """
         ...
 
     async def search(

@@ -3,6 +3,99 @@
 本文回答三件事：**代码怎么分层**、**每个插件点的契约是什么**、**怎么加一个新后端而不动业务代码**。
 阶段路线见 `docs/DEVELOPMENT_PLAN.md`。
 
+## 0. 系统概览
+
+> 本节原为 README 的「特性 / 架构 / 技术栈」三节，README 精简后下沉到这里，内容不变。
+
+### 0.1 能力清单
+
+- **文档与检索**：PDF / Word / Excel / 文本类解析（图片与扫描页走可插拔 OCR）；每个知识库一个独立
+  collection，统一 cosine 空间；`similarity` / `mmr` / `hybrid` 三种策略，返回**真实**相关度
+  （`1 - 余弦距离`），MMR 召回项如实标注「无分数」而不是伪造 1.0
+- **流式问答与会话**：SSE 逐 token 推送（先来源后答案），多轮对话取**最近** N 条历史，
+  会话、消息与引用来源全部持久化
+- **身份与访问控制**：本地账号 + JWT（HS256）登录，密码只存 argon2id 哈希（带随机盐），停用账号立即失效；
+  知识库级 ACL 分 `read`（看库 / 提问）/ `write`（+ 增删文档）/ `owner`（+ 改设置 / 删库 / 授权成员）三级，
+  列表按「我拥有或被授权」过滤
+- **模型后端可插拔**：Chat 与 Embedding 各自独立选型（Ollama / OpenRouter / DeepSeek / OpenAI 兼容 /
+  离线 mock），只改 `.env`；provider 名写错或漏填 Key 时得到「该去 `.env` 改哪个变量」的明确提示（503）。
+  七个插件点（provider / 向量库 / 缓存 / 队列 / 关系库 / 精排 / 查询改写）统一走 `plugins/` 注册表，
+  第三方包可用 entry point 注册实现而**不改本项目源码**；`GET /api/system/plugins` 可查当前后端与全部可选项
+- **性能与成本控制**：Embedding 缓存（按 `provider:model` 隔离）+ 检索缓存（LRU + TTL，按库精确失效）、
+  批量嵌入**真并发**（信号量限流 + 单批指数退避重试）、模型实例在工厂内复用、
+  文档入库走有界并发的后台队列（带退避重试）
+- **可观测与工程化**：每个请求一个 `request_id`（贯穿响应头、日志与 trace）；检索 / 问答 / 入库全链路
+  span 计时，可选上报 LangSmith（默认关闭，零网络零费用）；`LOG_FORMAT=json` 一行一 JSON；
+  `GET /api/system/metrics` 输出延迟分位、空召回、缓存命中与 token 用量；uv 锁依赖、Alembic 迁移、
+  生产环境拒绝用默认 / 过短的 JWT 密钥启动、ruff + mypy、离线 pytest 全量用例 + 联网验收用例、
+  Dockerfile + docker compose
+
+### 0.2 组件关系
+
+```mermaid
+flowchart LR
+    FE["Vue 3 前端<br/>登录态 + SSE 流式渲染"] --> API
+    subgraph API["FastAPI 后端（除登录与 /health 外均需登录）"]
+        AUTHAPI["认证 API<br/>登录 / 当前用户"]
+        GUARD["鉴权依赖 get_current_user<br/>+ ensure_kb_access"]
+        KB["知识库 API"]
+        DOC["文档 API"]
+        CHAT["对话 API / SSE"]
+        SYS["系统状态 API"]
+    end
+    GUARD --> ACL["core/access.py<br/>read / write / owner"]
+    ACL --> DB
+    CHAT --> RAG["RAG Service<br/>检索 + Prompt + LLM"]
+    DOC --> DS["Document Service<br/>解析 → 分块 → 入库"]
+    DS --> PARSE["Parser<br/>PDF/Word/Excel/Image"]
+    PARSE --> OCR["OCR Backend<br/>可插拔"]
+    DS --> VS["Vector Store Service"]
+    RAG --> VS
+    VS --> CACHE["QueryCache / EmbeddingCache"]
+    VS --> ZVEC[("zvec（Alibaba 开源）")]
+    VS --> EMB["Embedding Provider<br/>（providers 工厂）"]
+    RAG --> LLM["LLM Provider<br/>（providers 工厂）"]
+    KB --> DB[("SQLite（开发默认）<br/>PostgreSQL（部署）")]
+    DOC --> DB
+    CHAT --> DB
+```
+
+检索链路：查询 → 查询改写（可插拔，默认 none）→ 逐条查询做「向量召回 ∪ 词面 BM25 召回」→
+按分块融合 → 阈值过滤 → 精排（可插拔，默认 none）→ 检索缓存 → 组装 Prompt
+（含最近几轮对话历史）→ LLM（流式 / 非流式）→ 落库并返回引用来源。
+
+`providers/` 内部分层：`specs`（provider 元数据与校验，含 base_url / 模型名 / key 环境变量名）、
+`chat`（Chat 模型构造 + 离线 mock 模型）、`embeddings`（向量模型构造 + 截断包装 + 离线 mock 向量）、
+`factory`（按配置构造并缓存实例、探活、模型发现）。
+
+`plugins/registry.py` 是所有插件点的名单来源：`Registry[T]` 把「有哪些实现」变成运行时可枚举的数据，
+内置实现在各自模块注册，第三方包用 entry point（`inner_rag.chat_providers` / `inner_rag.embedding_providers` /
+`inner_rag.vector_stores` / `inner_rag.cache_backends` / `inner_rag.task_queues` /
+`inner_rag.rerankers` / `inner_rag.query_rewriters`）追加。
+关系库访问统一走 `repositories/`（`build_repositories(db)` 返回聚合仓储，与请求共享同一个会话）。
+
+### 0.3 技术栈
+
+| 层次 | 选型 |
+| --- | --- |
+| 语言 / 包管理 | Python 3.13（uv 管理）、`uv.lock` 锁定依赖 |
+| Web 框架 | FastAPI 0.141+、Uvicorn 0.54+、SSE 流式响应 |
+| LLM 编排 | LangChain 1.x（`langchain-core` 1.6+、`langchain-text-splitters`）+ `langchain-ollama`（本地）/ `langchain-openai`（OpenAI 兼容云端）/ `langchain-deepseek`（DeepSeek 官方集成） |
+| 向量库 | **zvec 0.7.0**（Alibaba 开源、嵌入式、HNSW + cosine，默认后端，锁版本）；ChromaDB 1.5+ / `langchain-chroma` 保留为兼容后端（`VECTOR_STORE=chroma`）；`memory` 零依赖进程内实现（测试 / CI / 替换演练用） |
+| 关系库 | SQLite（开发默认）+ PostgreSQL 16（部署可选）+ SQLAlchemy 2.1 + Alembic 1.20 |
+| 认证与权限 | JWT（PyJWT，HS256）+ argon2id 口令哈希（argon2-cffi）+ 知识库级 ACL（owner / member） |
+| 文档解析 | pypdf、PyMuPDF、python-docx、docx2txt、openpyxl、xlrd、Pillow、chardet |
+| 前端 | Vue 3 + Vite + Pinia + Tailwind CSS 3 |
+| 质量 | ruff、pytest（+ pytest-asyncio）、mypy |
+
+> **向量库选型**：本项目选用 **zvec**（[Alibaba 开源](https://github.com/alibaba/zvec)的嵌入式向量库，
+> Apache-2.0，定位「向量库里的 SQLite」：进程内嵌入、无需独立服务、HNSW + cosine、WAL 持久化），
+> 理由是「零运维」，与 SQLite 单文件开发模型一致。Phase 4 起 zvec 已是默认后端（`VECTOR_STORE=zvec`），
+> ChromaDB 保留为兼容实现；两者受同一个 `VectorStore` 契约约束并跑同一套契约测试（见本文 3.2）。
+> Phase 7 又加了 `memory`（零依赖进程内实现，`VECTOR_STORE=memory`）：它是「换后端不改业务代码」的实证——
+> 新增它只加了一个实现类 + 一次注册，同一套契约用例直接全绿；代价是数据只在内存、重启即丢，仅供测试与演练。
+> 注意内嵌 zvec 按 collection 目录独占写锁，**必须单进程部署**（不要 `uvicorn --workers`）。
+
 ## 1. 分层与依赖方向
 
 ```
@@ -24,13 +117,15 @@ src/inner_rag/
 │   ├── embedding.py   #   embedding 门面 + 缓存 + identity（含向量空间一致性校验）
 │   ├── vector_store/  #   向量库插件点：base 契约与共用语义 + zvec / chroma / memory 适配
 │   ├── lexical.py     #   词面检索（BM25，中文 bigram 分词，零依赖）；按库缓存倒排索引
-│   ├── retrieval.py   #   检索组合层：向量 ∪ 词面融合、阈值时机、词面启用门槛
+│   ├── retrieval.py   #   检索组合层：向量 ∪ 词面融合、阈值时机、词面启用门槛、多查询融合
+│   ├── rerank.py      #   精排插件点：none / lexical（候选集内 IDF 覆盖率）/ llm（listwise）
+│   ├── query_rewrite.py # 查询改写插件点：none / alias（别名表）/ keywords（剥疑问框架词）/ llm
 │   ├── cache.py       #   CacheBackend 契约 + memory 实现 + QueryCache / EmbeddingCache
 │   ├── task_queue.py  #   TaskQueue 契约 + inprocess / inline 实现
 │   ├── rag.py         #   检索 → Prompt 组装 → LLM 生成（含流式）
 │   └── retrieval_log.py # 检索与 Prompt 统计
 ├── repositories/      # 关系库插件点：base 契约（Protocol）+ sqlalchemy 实现 + build_repositories
-├── plugins/           # 插件注册表：Registry[T] + 五个插件点实例 + plugin_status()
+├── plugins/           # 插件注册表：Registry[T] + 七个插件点实例 + plugin_status()
 ├── providers/         # 模型后端插件层
 │   ├── specs.py       #   ProviderSpec 元数据 + 解析与校验（ProviderError）+ 注册内置实现
 │   ├── chat.py        #   Chat 实例构造（每 provider 一个构造器 + CHAT_BUILDERS 查表）
@@ -73,8 +168,10 @@ api  →  services  →  providers / repositories / plugins / core
 | 插件点 | 接口/门面（现状） | 内置实现 | 配置项 | 探活 | 契约测试 |
 | --- | --- | --- | --- | --- | --- |
 | Chat 模型 | `providers/factory.py::get_chat_model` + `plugins.chat_providers` | ollama / openrouter / deepseek / openai / mock | `LLM_PROVIDER`、`*_CHAT_MODEL`、`*_API_KEY`、`LLM_REASONING_EFFORT` | `chat_health()` → `/api/system/health` | `tests/test_providers.py`、`tests/test_plugins.py` |
-| Embedding 模型 | `providers/factory.py::get_embeddings` + `plugins.embedding_providers` | ollama / openrouter / openai / mock | `EMBEDDING_PROVIDER`、`*_EMBEDDING_MODEL`、`EMBEDDING_MAX_INPUT_CHARS` | `provider_catalog()` → `/api/system/providers` | `tests/test_providers.py`、`tests/test_plugins.py` |
-| 向量库 | `services/vector_store/`（`base.VectorStore` 契约 + `plugins.vector_stores` 注册表） | **zvec**（默认，Alibaba 开源嵌入式向量库）；chroma 兼容实现（cosine，每库一 collection）；memory（零依赖、进程内，测试与演练用） | `VECTOR_STORE`、`ZVEC_PATH`、`CHROMA_*`（仅 chroma）、`CHUNK_SIZE`、`CHUNK_OVERLAP` | `count(kb_id)` 与关系库对账（`scripts/check_vectors.py`）+ 冒烟链路上的上传 → 检索 | `tests/test_vector_store.py`（同一份契约参数化跑三个后端） |
+| Embedding 模型 | `providers/factory.py::get_embeddings` + `plugins.embedding_providers` | **sentence_transformers（默认，本机跑 Qwen 开源权重）**、ollama / openrouter / openai / mock | `EMBEDDING_PROVIDER`、`*_EMBEDDING_MODEL`、`SENTENCE_TRANSFORMERS_MODEL/DEVICE/BATCH_SIZE/NORMALIZE/ALLOW_DOWNLOAD`、`HF_ENDPOINT`、`EMBEDDING_MAX_INPUT_CHARS` | `provider_catalog()` → `/api/system/providers` | `tests/test_providers.py`、`tests/test_embedding.py`、`tests/test_plugins.py` |
+| 向量库 | `services/vector_store/`（`base.VectorStore` 契约 + `plugins.vector_stores` 注册表） | **zvec**（默认，Alibaba 开源嵌入式向量库）；chroma 兼容实现（cosine，每库一 collection）；memory（零依赖、进程内，测试与演练用） | `VECTOR_STORE`、`ZVEC_PATH`、`CHROMA_*`（仅 chroma）、`CHUNK_SIZE`、`CHUNK_OVERLAP` | `count(kb_id)` 与关系库对账（`scripts/check_vectors.py`）+ 冒烟链路上的上传 → 检索 | `tests/test_vector_store.py`（同一份契约参数化跑三个后端，含断点续跑） |
+| 精排（rerank） | `services/rerank.py`（`Reranker` Protocol + `plugins.rerankers`） | none（默认，不改顺序）、lexical（按「查询词元在候选集内的稀有度加权覆盖率」稳定重排，免模型）、llm（listwise，让模型返回编号序列） | `RERANK_BACKEND`、`RERANK_LLM_TOP_N`、`RERANK_LLM_SNIPPET_CHARS` | `reranker.is_enabled()`；`/api/system/plugins` 报当前后端 | `tests/test_rerank.py`（含「接进检索层的时机」与「实现违约时退回原顺序」用例） |
+| 查询改写（query rewrite） | `services/query_rewrite.py`（`QueryRewriter` Protocol + `plugins.query_rewriters`） | none（默认）、alias（`别名=正式名` 查表，拉丁别名大小写不敏感）、keywords（剥中文疑问框架词与虚词）、llm | `QUERY_REWRITE_BACKEND`、`QUERY_REWRITE_MAX_QUERIES`、`QUERY_ALIASES` | 同上 | `tests/test_query_rewrite.py`（含「首条恒为原查询」契约与多查询召回用例） |
 | 关系库 | `repositories/`（`base.py` 契约 + `sqlalchemy.py` 实现 + `build_repositories`）+ Alembic | SQLite（默认）/ PostgreSQL，均走 SQLAlchemy 2.x | `DATABASE_URL` | `lifespan` 里 `check_database()` | `tests/test_repositories.py`、`tests/test_api.py` |
 | 缓存 | `services/cache.py`（`CacheBackend` 契约 + `plugins.cache_backends`） | memory（每 namespace 一份 LRU，可配容量/TTL） | `CACHE_BACKEND`、`QUERY_CACHE_MAX_SIZE`、`QUERY_CACHE_TTL`、`EMBEDDING_CACHE_MAX_SIZE` | `/api/system/stats` 的 `*_cache.stats()`（含命中率） | `tests/test_cache.py`（`BACKEND_FACTORIES` 参数化） |
 | 后台任务 | `services/task_queue.py`（`TaskQueue` 契约 + `plugins.task_queues`） | inprocess（协程池 + 退避重试）、inline（同步执行，测试用） | `TASK_QUEUE_BACKEND`、`TASK_QUEUE_CONCURRENCY`、`TASK_QUEUE_MAX_RETRIES`、`TASK_QUEUE_RETRY_BACKOFF`、`TASK_QUEUE_HISTORY` | `/api/system/stats` 的 `task_queue.summary()` | `tests/test_task_queue.py` |
@@ -86,7 +183,8 @@ api  →  services  →  providers / repositories / plugins / core
 「五件套」标准：**接口 + 内置实现 + 配置项 + 探活 + 契约测试**。少任何一件都不算可插拔完成——
 尤其是探活与契约测试，这两件最容易漏，漏了就会在换后端时才发现问题。
 
-**统一注册表（Phase 7 交付）**：上表里前五个插件点（chat / embedding / 向量库 / 缓存 / 队列）都由
+**统一注册表（Phase 7 交付，Phase 8 扩容）**：上表里前七个插件点（chat / embedding / 向量库 / 缓存 /
+队列 / 精排 / 查询改写）都由
 `plugins/registry.py` 的 `Registry` 实例维护名单，因此：
 
 - 配置写错时的报错文案能自动列出当前可选后端（不再是各处手写的常量列表，也就不会漏改）；
@@ -149,6 +247,24 @@ def provider_catalog() -> dict[str, list[dict[str, Any]]]: ...  # 含 third_part
 4. **错误归一**：网络/鉴权/参数错误统一包成 `ProviderError`，消息含 provider、model 与可变项提示。
 5. **身份稳定**：`identity` 变了就必须提示重建索引，不允许静默跨向量空间检索。
 
+### 3.1.1 本地嵌入后端（sentence_transformers，默认）
+
+默认 embedding 走**本机部署的开源权重**（`EMBEDDING_PROVIDER=sentence_transformers`，
+默认模型 `Qwen/Qwen3-Embedding-0.6B`，1024 维）。改这条默认值的原因是运维事实，不是偏好：
+云端网关的免费额度是**按请求数**限流的（一整天 1000 次），而一次全库重建要发 500+ 次请求，
+「建一次库就花掉半天额度」，重试一次就超；本地权重只受 GPU 时间约束。
+
+实现要点（`providers/embeddings.py::SentenceTransformerEmbeddings`）：
+
+| 关注点 | 处理方式 | 为什么 |
+| --- | --- | --- |
+| 重依赖 | `sentence-transformers` + `torch` 放在 `uv sync --extra local-embed` | 让不用本地嵌入的部署（CI、纯云端）不必拉 500MB+ 的 torch |
+| 模型加载 | **懒加载**：构造函数只读配置，`_load()` 里才 `import` 与建模型 | 保证「不联网构造」这条契约（见上），启动不被权重下载卡住 |
+| 首次下载 | `SENTENCE_TRANSFORMERS_ALLOW_DOWNLOAD=true` 允许从 hub 拉；`HF_ENDPOINT` 可指向镜像 | 离线部署时改为 `local_files_only=True`，走预置的模型目录 |
+| GPU 并发 | `threading.Lock()` 把推理串行化 | 一个进程里多个批次挤同一块 GPU 只会互相抢显存，不会更快 |
+| query 侧前缀 | 仅当模型的 `prompts` 里真的声明了 `query` 才传 `prompt_name="query"` | 不硬编码模型名：换了模型（或该模型不需要前缀）不会把前缀错加上去 |
+| 向量空间一致性 | `identity` = `sentence_transformers:<model>`，照旧写进知识库并做校验 | 换模型 = 换向量空间，必须重建索引，这一点不因走本地而豁免 |
+
 ### 3.2 向量库（`VectorStore`）
 
 **实现者**：zvec（Alibaba 开源嵌入式向量库，Phase 4 起为默认后端，`VECTOR_STORE=zvec`）/ chroma（迁移前的实现，
@@ -161,7 +277,8 @@ def provider_catalog() -> dict[str, list[dict[str, Any]]]: ...  # 含 third_part
 class VectorStore(Protocol):
     async def add_documents(
         self, kb_id: int, documents: list[Document], doc_id: int, filename: str
-    ) -> int: ...  # 返回写入分块数
+    ) -> int: ...  # 返回「本次新写入」的分块数；必须幂等且可续跑
+    def stored_chunk_keys(self, kb_id: int, doc_id: int) -> set[tuple[str, str]]: ...  # 续跑进度
     async def search(
         self,
         kb_id: int,
@@ -177,6 +294,36 @@ class VectorStore(Protocol):
     def count_chunks_by_filename(self, kb_id: int) -> dict[str, int]: ...  # 诊断：各文件分块数
     def list_doc_ids(self, kb_id: int) -> list[str]: ...  # 诊断：发现删除后的残留向量
 ```
+
+#### 写入路径：流式分批落库 + 断点续跑
+
+入库是长任务（全库 1.1 万分块、500+ 批），必须假设它**一定会被打断**（429、超时、进程被杀）。
+所以写入路径按「中断是常态」设计，三个后端共用同一套语义：
+
+```
+services/vector_store/base.py::embed_batches_in_order(chunks)   # 异步生成器
+    ├── 一次性派发全部批次任务（并发由 embedding_service 的信号量压到 EMBEDDING_CONCURRENCY）
+    ├── 按输入顺序 await 并 yield (批次, 向量)      → 吞吐不打折、顺序有保证
+    └── finally: 取消未完成的兄弟任务               → 失败是「确定且可重试」的，不留后台请求
+
+zvec_store / chroma_store / memory_store::add_documents
+    ├── stored = self.stored_chunk_keys(kb_id, doc_id)     # 进度来源**就是向量库自己**
+    ├── pending = [c for c in chunks if normalized_chunk_key(c) not in stored]
+    ├── async for batch, vectors in embed_batches_in_order(pending):
+    │       └── 逐批 upsert + flush（zvec）/ add_documents(embeddings=...)（chroma）/ 覆盖写（memory）
+    └── zvec 末尾补一次 optimize（索引收尾，幂等）
+```
+
+两条关键取舍：
+
+- **不引入进度文件**：`(doc_id, chunk_index)` 是确定性键，向量库里有就是写过、没有就是没写。
+  额外的进度文件只会多一个「和实际状态不一致」的地方。
+- **不做「全部算完再写」**：一份文档整份算完才落库的话，任何一批失败都会让**已经算好的几百批作废**；
+  改成逐批落库后，最坏只丢「在途的那几批」（≤ 并发上限），重跑一次就是续跑。
+
+因此入库脚本（`scripts/build_eval_kb.py`）**默认行为是续跑**：同名知识库已存在就复用（不删向量），
+只有显式加 `--rebuild` 才是「删库重来」。`add_documents` 的返回值是「本次新写入」的分块数，
+所以对账与 manifest 一律取 `count(kb_id)`（向量库实际条数），不取返回值。
 
 必须遵守的语义（契约测试逐条断言，三个后端跑同一份 `tests/test_vector_store.py`）：
 
@@ -202,13 +349,17 @@ class VectorStore(Protocol):
 | `cosine_similarity` / `maximal_marginal_relevance` | MMR（`λ·sim(query,d) - (1-λ)·max sim(d,已选)`） |
 | `merge_hybrid` | 相似度结果 + MMR 去重补充到 k 条（补入项分数为 `None`） |
 | `chunk_key` | 混合检索去重用的分块标识 |
+| `normalized_chunk_key` | `chunk_key` 的字符串化版本：`chunk_index` 在元数据里可能是 int（内存后端）或 str（zvec schema），跨后端比较「是否已入库」必须先统一 |
+| `embed_batches_in_order` | 分批嵌入并按序 `yield (批次, 向量)`，让调用方边算边落库；失败时取消兄弟批次 |
+| `stored_chunk_keys`（契约） | 「这份文档已经写进去哪些分块」= 断点续跑的进度来源 |
 | `iter_chunks` | 读出整库分块（离线读路径，**不在检索热路径**）：词面检索建倒排索引用 |
 
 三个后端的实现映射（as-built，细节见各自模块 docstring）：
 
 | 契约方法 | zvec | chroma | memory |
 | --- | --- | --- | --- |
-| `add_documents` | 分批（50 条）`collection.upsert(Doc(id, vectors, fields))` → `flush()` → `optimize()`；id 由 `kb-doc-chunk` 组装 | LangChain `add_documents` + uuid id | `{kb_id: {(doc_id, chunk_index): 记录}}` 覆盖写；向量来自 `embedding_service` |
+| `add_documents` | 过滤 `stored_chunk_keys` → 逐批 `collection.upsert(Doc(id, vectors, fields))` + `flush()` → 收尾 `optimize()`；id 由 `kb-doc-chunk` 组装 | 过滤后再逐批 `add_documents(batch, ids=[uuid…], embeddings=已算好的向量)` + uuid id | `{kb_id: {(doc_id, chunk_index): 记录}}` 覆盖写；向量来自 `embedding_service` |
+| `stored_chunk_keys` | `iter_docs(["doc_id","chunk_index"], include_vector=False)` 扫一遍再按 doc_id 筛（zvec 的 `iter_docs` 不支持 filter） | `collection.get(where={"doc_id": …}, include=["metadatas"])`；collection 不存在时按「一个都没入库」处理 | `{key for key in bucket if key[0] == doc_id}` |
 | `search` | `collection.query(queries=Query(field_name="embedding", vector=...), topk, filter, output_fields)`；MMR 复用 `base` | LangChain 的 similarity / MMR 检索调用 | 纯 Python 线性扫描（`heapq.nsmallest`）；MMR / hybrid 复用 `base` |
 | `count` | `collection.stats.doc_count` | `collection.count()` | `len(bucket)` |
 | `delete_document` | 先 `iter_docs` 数出分块数，再 `delete_by_filter('doc_id = "…"')` | `collection.delete(where=...)` | 按 `doc_id` 过滤后从 dict 删除 |
@@ -437,7 +588,78 @@ class TaskQueue(Protocol):
 
 **已知取舍**（写明是为了不被当成 bug）：Token 存 localStorage（无 logout 接口，客户端丢弃即可）；
 停用账号（`is_active=false`）会让已签发 Token 立即失效，但**改口令不会**——JWT 无状态，
-短 TTL 是泄漏后的唯一收敛手段（README「配置说明」）。
+短 TTL 是泄漏后的唯一收敛手段（见 `configuration.md`）。
+
+### 3.9 精排（rerank，Phase 8.2）
+
+**为什么单开一层**：`retrieval.py` 的融合分只有一个维度，它决定「谁进 Top-k」；但**谁进 context**
+是另一件事——`RERANK_TOP_K`（默认 5）小于 `TOP_K`（默认 8），Top-k 里排在 6–8 位的候选会被整条丢掉。
+小库实测显示这一段恰好是失分点：三道题的期望页卡在 6–8 位，且它们与第 5 名的分差只有
+**0.003–0.04**（见 `evaluation.md` 4.6）——粗排在这么窄的区间里排序本来就不可靠：粗排融合的是
+「两条召回通道的置信度」，而精排可以直接看「候选与查询的贴合程度」，这是两种不同的证据。
+
+**契约**（每个实现都要满足，`tests/test_rerank.py` 逐条验证）：
+
+1. **只改顺序，不得增删，也不得改分。** 分数既用于 `RETRIEVAL_SCORE_THRESHOLD` 判定，也用于前端展示；
+   让 rerank 改分会让「同一个阈值」在不同配置下含义不同，两次评测也就无法对照。
+2. **失败必须退回原顺序**：抛异常、解析不出、模型返回垃圾时一律原样返回。精排是「有则更好」的一层。
+3. 默认 `none`（不启用）。rerank 必然改变排序，必须先在评测集上证明有提升再打开。
+
+```python
+# src/inner_rag/services/rerank.py（契约）
+class Reranker(Protocol):
+    name: str
+
+    async def rerank(self, kb_id: int, query: str, results: RetrievalResult) -> RetrievalResult: ...
+```
+
+| 实现 | 做法 | 成本 |
+| --- | --- | --- |
+| `none`（默认） | 原样返回，`is_enabled()` 为假时检索层根本不会调用 | 零 |
+| `lexical` | 按「查询词元在**候选集内**的稀有度加权覆盖率」稳定重排。`candidate_idf(term) = log(1 + (N - df + 0.5) / (df + 0.5))`——查询词在这批候选里人人皆有时无信息量 | 零（纯本地计算） |
+| `llm` | listwise：把前 `RERANK_LLM_TOP_N` 条候选带 `RERANK_LLM_SNIPPET_CHARS` 字符片段交给模型，要求返回编号序列；`parse_order()` 抽数字 → 去重 → 丢越界，剩余 tail 接在后面 | 一次 LLM 调用 |
+
+**接进检索层的时机**在 `retrieval._finish`：阈值过滤 **之后**。顺序反过来的话，精排会把一些
+本该被阈值滤掉的候选排进 Top-k，等于绕过了阈值。如果某个实现返回的条数与输入不一致（违约），
+检索层退回原顺序并把 span 标记 `violated=True`，而不是信任它的输出。
+
+### 3.10 查询改写（query rewrite，Phase 8.3）
+
+**为什么单开一层**：小库实测里有两类题是纯措辞问题，跟向量质量无关——**别名题**
+（「Sakura 是谁？」：Sakura 与「路明非」字面毫无重合，词面检索帮不上，embedding 也拉不到一起，
+只能靠外部知识把别名展开）与**口语化提问**（「诺诺的真名是什么？」：`是什么` / `的` 这类疑问框架
+稀释了 BM25 的词元集，真正有区分度的实词反而压不过噪声）。
+
+**契约**：
+
+1. `rewrite` 返回**要检索的查询列表，且必须把原查询放在第一位**——由模块级入口统一兜住，
+   任何实现都不能违反。这样「改写没帮上忙」时最坏也只是多跑一路召回，不会比不改写更差。
+2. 变体数由 `QUERY_REWRITE_MAX_QUERIES`（默认 3，含原查询）截断，避免把检索成本放大。
+3. 改写**不改变阈值语义**：多路召回的结果按分块取最大分融合，阈值仍在融合之后统一生效。
+4. 失败退回 `[query]`。
+
+```python
+# src/inner_rag/services/query_rewrite.py（模块级入口，所有实现都经它收口）
+async def rewrite(kb_id: int, query: str) -> list[str]:
+    queries = await query_rewriter.rewrite(kb_id, query)
+    limit = max(1, settings.QUERY_REWRITE_MAX_QUERIES)
+    ordered = [query]  # 首条恒为原查询
+    for item in queries:
+        text = item.strip()
+        if text and text != query and text not in ordered:
+            ordered.append(text)  # 去空、去重、去与原查询等价的条目
+    return ordered[:limit]
+```
+
+| 实现 | 做法 |
+| --- | --- |
+| `none`（默认） | 原样返回 `[query]` |
+| `alias` | 查 `QUERY_ALIASES`（`别名=正式名` 逗号分隔）；坏行告警跳过，不静默；拉丁别名大小写不敏感，中文精确匹配 |
+| `keywords` | `strip_stopwords()` 把 `STOPWORDS`（中文疑问框架 + 虚词 + 英文疑问词，按长度降序匹配以免「为什么」被「为」先吃掉）**替换成空格**（不是删掉，以保留词边界）：`"诺诺的真名是什么？" → "诺诺 真名"` |
+| `llm` | 让模型输出若干改写行；`_parse_lines()` 去编号前缀、去重、剔除与原查询等价的条目 |
+
+**多查询如何融合**：`retrieval.search()` 对每个变体各跑一次「向量 ∪ 词面」召回，按分块取最大分合并，
+再做阈值过滤与精排。因此一条改写最多把召回成本乘以变体数——这也是默认关闭、且限制条数的原因。
 
 ## 4. 关系库 vs 向量库：各存什么、怎么对账
 

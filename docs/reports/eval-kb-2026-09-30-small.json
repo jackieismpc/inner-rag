@@ -1,5 +1,5 @@
 {
-  "kb_id": 1,
+  "kb_id": 3,
   "name": "dragon_king_small",
   "profile": "small",
   "source": "data/uploads/龙族.pdf",
@@ -54,12 +54,15 @@
   "chunks": 227,
   "chunk_size": 1000,
   "chunk_overlap": 200,
-  "embedding_identity": "openrouter:liquid/lfm-2.5-embedding-350m:free",
-  "embedding_max_input_chars": 400,
+  "embedding_identity": "sentence_transformers:Qwen/Qwen3-Embedding-0.6B",
+  "embedding_max_input_chars": 0,
   "app_version": "0.3.0",
-  "git_commit": "4d4e290",
-  "built_at": "2026-09-30T03:37:58+00:00",
-  "duration_s": 312.8,
+  "git_commit": "2b5343b",
+  "built_at": "2026-09-30T11:14:32+00:00",
+  "duration_s": 21.0,
   "est_cost_usd": 0.0,
-  "warnings": []
+  "warnings": [
+    "无关章节 p956 命中评测证据原文：校长指向被隔离在密封玻璃仓中的铜罐…",
+    "无关章节 p8016 命中评测证据原文：听取镰鼬带回的声音碎…"
+  ]
 }

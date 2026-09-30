@@ -1,11 +1,16 @@
-"""检索组合层：把「向量召回」和「词面召回」融合成一路结果。
+"""检索组合层：把「查询改写」「向量召回」「词面召回」「精排」串成一条检索流水线。
 
-为什么要有这一层：`vector_service.search` 只回答「向量库怎么查」，而「这次查询到底该用哪几路
-召回、怎么合成一个分数」是业务决策，不该压进每个后端适配器里。放进组合层后：
+为什么要有这一层：`vector_service.search` 只回答「向量库怎么查」，而「这次查询到底该走哪几路
+召回、怎么合成一个分数、谁进 context」是业务决策，不该压进每个后端适配器里。放进组合层后：
 
 * 后端依旧是「一个向量库」的实现（换向量库不影响召回策略）；
 * 问答、基准、探针脚本共用同一条检索路径——评测测的就是线上跑的那条路，
   否则「评测涨了、线上没变」这类偏差永远查不出来。
+
+流水线（每一步都是可插拔的，见 `docs/architecture.md` 第 2 节）：
+
+    query_rewrite（默认 none）→ 逐条查询做 向量召回 ∪ 词面召回 → 按分块融合
+        → 阈值过滤（融合之后统一生效）→ rerank（默认 none）
 
 `strategy` 的三种取值（对外语义）：
 
@@ -25,6 +30,9 @@
   ``RETRIEVAL_SCORE_THRESHOLD`` 的语义冲掉；代价是**词面第一名恒为 ``w``**，
   只要词面命中一条就必然过阈值——这也是前置门不可省的原因；
 * MMR 补充项（``score=None``）按契约不过阈值过滤，融合后仍保持 ``None``。
+
+阈值为什么在融合之后：先按阈值过滤再融合，会把「向量分数低但词面完全匹配」的候选提前
+丢掉，而补上这一路正是融合的目的。代价是**阈值比较的是融合分**，不是单纯的余弦相关度。
 """
 
 from __future__ import annotations
@@ -33,6 +41,7 @@ from langchain_core.documents import Document
 
 from inner_rag.core.config import settings
 from inner_rag.core.observability import tracer
+from inner_rag.services import query_rewrite, rerank
 from inner_rag.services.lexical import lexical_index, normalize_scores
 from inner_rag.services.vector_store import vector_service
 from inner_rag.services.vector_store.base import (
@@ -75,6 +84,30 @@ def fuse(dense: RetrievalResult, sparse: list[tuple[Document, float]], k: int) -
     return ranked[:k]
 
 
+async def _finish(
+    kb_id: int,
+    query: str,
+    raw: RetrievalResult,
+    threshold: float,
+) -> tuple[RetrievalResult, int]:
+    """收尾：阈值过滤 + 精排。两条召回路径都从这里出去，保证阈值语义只有一份。"""
+    results, filtered_out = finalize_results(raw, threshold)
+    if not rerank.is_enabled() or len(results) <= 1:
+        return results, filtered_out
+
+    async with tracer.span(
+        "rerank", kb_id=kb_id, backend=rerank.reranker.name, candidates=len(results)
+    ) as rerank_span:
+        reordered = await rerank.reranker.rerank(kb_id, query, results)
+        # 精排契约是「只改顺序」，条数必须一致；不一致说明实现违约，退回原顺序更安全
+        if len(reordered) != len(results):
+            rerank_span.set(violated=True)
+            return results, filtered_out
+        moved = sum(1 for before, after in zip(results, reordered, strict=True) if before != after)
+        rerank_span.set(moved=moved)
+    return reordered, filtered_out
+
+
 async def search(
     kb_id: int,
     query: str,
@@ -85,24 +118,28 @@ async def search(
 ) -> tuple[RetrievalResult, int]:
     """检索入口：返回 ``(结果, 被阈值滤掉的条数)``，语义与 ``vector_service.search`` 一致。"""
     k, threshold = resolve_search_defaults(k, score_threshold)
+    queries = await query_rewrite.rewrite(kb_id, query)
 
     async with tracer.span(
         "vector.search",
         kb_id=kb_id,
         strategy=strategy,
         k=k,
+        queries=len(queries),
         lexical=bool(strategy == "hybrid" and settings.HYBRID_SPARSE_WEIGHT > 0),
     ) as span:
-        dense, filtered_out = await vector_service.search(
-            kb_id=kb_id,
-            query=query,
-            k=k,
-            strategy=strategy,
-            # 阈值在融合之后统一生效：先按阈值过滤再融合，会把「向量分数低但词面完全匹配」
-            # 的候选提前丢掉，而补上这一路正是融合的目的。
-            score_threshold=0.0,
-            filter_doc_ids=filter_doc_ids,
-        )
+        dense: RetrievalResult = []
+        for sub_query in queries:
+            dense_hits, _filtered = await vector_service.search(
+                kb_id=kb_id,
+                query=sub_query,
+                k=k,
+                strategy=strategy,
+                # 阈值在融合之后统一生效（见模块 docstring）
+                score_threshold=0.0,
+                filter_doc_ids=filter_doc_ids,
+            )
+            dense.extend(dense_hits)
         span.set(dense_hits=len(dense))
 
         # 词面这一路是**补充**，不是独立的召回源：两路里至少要有一路拿出实质证据才启用。
@@ -125,25 +162,31 @@ async def search(
         sparse: list[tuple[Document, float]] = []
         if strategy == "hybrid" and settings.HYBRID_SPARSE_WEIGHT > 0:
             async with tracer.span("lexical.search", kb_id=kb_id) as lexical_span:
-                hits = lexical_index.search(kb_id, query, k, filter_doc_ids)
-                strongest = hits[0][1] if hits else 0.0
+                hits_by_query = [
+                    lexical_index.search(kb_id, sub_query, k, filter_doc_ids)
+                    for sub_query in queries
+                ]
+                strongest = max(
+                    (query_hits[0][1] for query_hits in hits_by_query if query_hits),
+                    default=0.0,
+                )
                 enabled = dense_support or strongest >= settings.HYBRID_MIN_SPARSE_SCORE
                 lexical_span.set(strongest=round(strongest, 3), enabled=enabled)
                 if enabled:
-                    sparse = [
-                        (doc, score * settings.HYBRID_SPARSE_WEIGHT)
-                        for doc, score in normalize_scores(hits)
-                    ]
-            lexical_span.set(hits=len(sparse))
+                    for query_hits in hits_by_query:
+                        sparse.extend(
+                            (doc, score * settings.HYBRID_SPARSE_WEIGHT)
+                            for doc, score in normalize_scores(query_hits)
+                        )
+                lexical_span.set(hits=len(sparse))
 
         if not sparse:
-            results, filtered_out = finalize_results(dense, threshold)
+            results, filtered_out = await _finish(kb_id, query, dense, threshold)
             span.set(hits=len(results), filtered_out=filtered_out, sparse_hits=0)
             return results, filtered_out
 
         # dense 侧的 filtered_out 在融合后不再有意义：融合可能把被滤掉的分块重新带回，
         # 因此过滤计数一律以融合后的结果为准（重跑一次 finalize_results 即得）。
-        fused = fuse(dense, sparse, k)
-        results, filtered_out = finalize_results(fused, threshold)
+        results, filtered_out = await _finish(kb_id, query, fuse(dense, sparse, k), threshold)
         span.set(hits=len(results), filtered_out=filtered_out, sparse_hits=len(sparse))
         return results, filtered_out

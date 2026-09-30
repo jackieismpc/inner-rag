@@ -32,11 +32,16 @@
 
 | 改了什么 | 必须同步到哪里 |
 | --- | --- |
-| 新增 / 修改配置项 | `.env.example` + `README.md` 配置表 |
-| 新增 / 修改接口、SSE 事件 | `README.md`「API 一览」+ `docs/architecture.md` 契约 |
+| 新增 / 修改配置项 | `.env.example` + `docs/configuration.md` 配置表 |
+| 新增 / 修改接口、SSE 事件 | `docs/usage.md`「API 一览」+ `docs/architecture.md` 契约 |
+| 运维脚本 / 部署 / 常见问题 | `docs/operations.md` |
+| 使用流程（建库 → 上传 → 提问） | `docs/usage.md` |
 | 行为 / 错误 / 降级契约变化 | 对应的 `docs/*.md` |
 | 阶段结论、指标 | `docs/reports/`（若有）+ `docs/evaluation.md` 基线表 |
 | 每一次改动本身 | `CHANGELOG.md`（见 1.1） |
+
+> README 只保留四段：**背景 / Introduction / Quick Start / Benchmark**。其余内容一律下沉到 `docs/`，
+> 新增说明不要再往 README 里堆。
 
 ## 2. 写代码前先想清楚：禁止无效防御
 
