@@ -219,6 +219,20 @@ class ChromaVectorStore:
     def list_doc_ids(self, kb_id: int) -> list[str]:
         return [str(metadata.get("doc_id")) for metadata in self._all_metadatas(kb_id)]
 
+    def iter_chunks(self, kb_id: int) -> list[Document]:
+        """一次性取回全部分块（正文 + 元数据），供建倒排索引 / 对账用。"""
+        try:
+            collection = self._get_client().get_collection(self._collection_name(kb_id))
+            result = collection.get(include=["documents", "metadatas"], limit=100000)
+        except Exception:
+            return []
+        documents = (result or {}).get("documents") or []
+        metadatas = (result or {}).get("metadatas") or []
+        return [
+            Document(page_content=text or "", metadata=dict(metadata or {}))
+            for text, metadata in zip(documents, metadatas, strict=False)
+        ]
+
     def _all_metadatas(self, kb_id: int) -> list[Mapping[str, Any]]:
         try:
             collection = self._get_client().get_collection(self._collection_name(kb_id))

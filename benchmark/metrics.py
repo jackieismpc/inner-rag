@@ -139,8 +139,87 @@ def citation_precision(cited_pages: Sequence[int], expected_pages: Sequence[int]
     return spans_citation_precision(spans_from_pages(cited_pages), expected_pages)
 
 
+def spans_citation_hit(
+    cited_spans: Sequence[tuple[int, int]], expected_pages: Sequence[int]
+) -> bool:
+    """引用命中：引用的来源里**至少有一条**覆盖期望页。
+
+    为什么除了精度还要有这个：精度的分母是「本题引用了多少条来源」，而引用的条数在不同
+    配置下会变——一道题一条都没召回时精度记 0.0（不是 0/5），只召回一条且恰好对时精度是
+    1/1 = 100%。实测改动前后引用条数从平均 4.1 条变成 5.0 条，两个精度值因此**不可比**
+    （见 docs/evaluation.md 4.4）。引用命中是「这道题有没有引对」的 0/1 判定，与 Recall@k
+    同口径，可以跨配置比较，也是 DoD 里「引用命中率 ≥ 0.8」对应的量。
+    """
+    wanted = set(expected_pages)
+    if not wanted:
+        return False
+    spans = list(dict.fromkeys(cited_spans))
+    return any(any(_span_covers(span, page) for page in wanted) for span in spans)
+
+
+def citation_hit(cited_pages: Sequence[int], expected_pages: Sequence[int]) -> bool:
+    """单点口径的引用命中。"""
+    return spans_citation_hit(spans_from_pages(cited_pages), expected_pages)
+
+
 def _mean(values: Sequence[float]) -> float:
     return float(mean(values)) if values else 0.0
+
+
+def threshold_curve(results: Sequence[dict], thresholds: Sequence[float]) -> list[dict]:
+    """从「未过滤的一次召回」推导各阈值下的检索指标。
+
+    为什么能这么做：阈值过滤发生在 Top-k **之后**（`finalize_results` 先滤后排），
+    所以一次 `threshold=0` 的召回就包含全部信息——对任一阈值 t，只需丢掉 score < t 的条目
+    再重算命中判定，结果与真的按 t 检索完全一致，不必为每个候选阈值各跑一遍（省时也省钱）。
+
+    前置条件：结果里要有 `scores` 与 `expected_pages`（run_bench 会写）；
+    老结果 JSON 缺字段时返回空表，而不是算出一堆 0 分。
+    """
+    usable = [r for r in results if r.get("scores") and r.get("expected_pages") is not None]
+    if not usable:
+        return []
+
+    curve: list[dict] = []
+    for threshold in thresholds:
+        recall: list[float] = []
+        rr: list[float] = []
+        page_hit: list[float] = []
+        empty_items = 0
+        kept_total = 0
+
+        for result in usable:
+            spans = [
+                span
+                for span, score in zip(result["retrieved_spans"], result["scores"], strict=False)
+                if score is None or score >= threshold
+            ]
+            kept_total += len(spans)
+            if not spans:
+                empty_items += 1
+            if result["expect_refusal"]:
+                continue
+            pages = expected_pages_of(result)
+            recall.append(1.0 if spans_hit(spans, pages) else 0.0)
+            rr.append(spans_reciprocal_rank(spans, pages))
+            page_hit.append(spans_page_hit_rate(spans, pages))
+
+        curve.append(
+            {
+                "threshold": round(float(threshold), 4),
+                "recall_at_k": _mean(recall),
+                "mrr": _mean(rr),
+                "page_hit_rate": _mean(page_hit),
+                "empty_items": empty_items,
+                "kept_avg": round(kept_total / len(usable), 2),
+            }
+        )
+    return curve
+
+
+def expected_pages_of(result: dict) -> list[int]:
+    """从逐题结果里取期望锚点页（`run_bench` 写入的 `expected_pages`）。缺失返回空列表。"""
+    return list(result.get("expected_pages") or [])
 
 
 def summarize(results: Sequence[dict]) -> dict:
@@ -155,6 +234,7 @@ def summarize(results: Sequence[dict]) -> dict:
     citations = [
         r["citation_precision"] for r in positives if r.get("citation_precision") is not None
     ]
+    citation_hits = [r["citation_hit"] for r in positives if r.get("citation_hit") is not None]
     forbidden = [r["forbidden_hit"] for r in results if r.get("forbidden_hit") is not None]
     refusals = [r["refusal"] for r in negatives if r.get("refusal") is not None]
     # 误拒率：该答却拒答（正样本被判为拒答的比例），与拒答正确率一起看才有意义
@@ -180,6 +260,10 @@ def summarize(results: Sequence[dict]) -> dict:
         "keyword_coverage": _mean(keywords) if keywords else None,
         "forbidden_rate": _mean([1.0 if f else 0.0 for f in forbidden]) if forbidden else None,
         "citation_precision": _mean(citations) if citations else None,
+        # 与 citation_precision 同源但口径可比：分母恒为「题数」，不随引用条数漂移
+        "citation_hit_rate": _mean([1.0 if h else 0.0 for h in citation_hits])
+        if citation_hits
+        else None,
         "refusal_accuracy": _mean([1.0 if r else 0.0 for r in refusals]) if refusals else None,
         "false_refusal_rate": _mean([1.0 if r else 0.0 for r in false_refusals])
         if false_refusals

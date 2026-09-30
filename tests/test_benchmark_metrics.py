@@ -51,6 +51,29 @@ def test_citation_precision_penalizes_extra_citations() -> None:
     assert metrics.citation_precision([], [5904]) == 0.0
 
 
+def test_citation_hit_is_per_question_not_per_span() -> None:
+    """引用命中只看「有没有引对」，因此不受引用条数影响——这正是它与精度互补的原因。"""
+    assert metrics.citation_hit([5904, 1, 2, 3, 4], [5904]) is True  # 引对一条即命中
+    assert metrics.citation_hit([1, 2, 3, 4, 5], [5904]) is False
+    assert metrics.citation_hit([], [5904]) is False
+    assert metrics.citation_hit([5904], []) is False  # 负样本没有期望页，不算命中
+
+
+def test_citation_hit_contrasts_with_precision_on_degenerate_citations() -> None:
+    """退化引用的两个极端：精度会把它们拉向 0% / 100%，而命中只看对错。
+
+    改动前后引用条数从 4.1 条变 5.0 条，精度因此不可比（真实踩到过的坑，
+    见 docs/evaluation.md 4.4）；下面这两个断言就是那次误判的最小复现。
+    """
+    # 只引了一条，恰好是对的：精度 100%，但只有一条来源
+    assert metrics.citation_precision([123], [123]) == 1.0
+    assert metrics.citation_hit([123], [123]) is True
+
+    # 一条都没引：精度 0%
+    assert metrics.citation_precision([], [123]) == 0.0
+    assert metrics.citation_hit([], [123]) is False
+
+
 def test_summarize_separates_positives_from_negatives() -> None:
     results = [
         {
@@ -61,6 +84,7 @@ def test_summarize_separates_positives_from_negatives() -> None:
             "retrieval_ms": 10.0,
             "keyword_coverage": 1.0,
             "citation_precision": 1.0,
+            "citation_hit": True,
             "forbidden_hit": False,
             "refusal": None,
             "total_ms": 100.0,
@@ -73,6 +97,7 @@ def test_summarize_separates_positives_from_negatives() -> None:
             "retrieval_ms": 30.0,
             "keyword_coverage": 0.5,
             "citation_precision": 0.0,
+            "citation_hit": False,
             "forbidden_hit": True,
             "refusal": None,
             "total_ms": 200.0,
@@ -85,6 +110,7 @@ def test_summarize_separates_positives_from_negatives() -> None:
             "retrieval_ms": 20.0,
             "keyword_coverage": None,
             "citation_precision": None,
+            "citation_hit": None,
             "forbidden_hit": None,
             "refusal": True,
             "total_ms": None,
@@ -102,11 +128,37 @@ def test_summarize_separates_positives_from_negatives() -> None:
     assert summary["keyword_coverage"] == pytest.approx(0.75)
     assert summary["forbidden_rate"] == pytest.approx(0.5)
     assert summary["citation_precision"] == pytest.approx(0.5)
+    assert summary["citation_hit_rate"] == pytest.approx(0.5)
     assert summary["refusal_accuracy"] == pytest.approx(1.0)
     assert summary["retrieval_p50_ms"] == pytest.approx(20.0)
     assert summary["retrieval_p95_ms"] == pytest.approx(29.0)
     assert summary["total_p50_ms"] == pytest.approx(150.0)
     assert summary["total_p95_ms"] == pytest.approx(195.0)
+
+
+def test_summarize_returns_none_for_metrics_without_data() -> None:
+    """老结果 JSON 没有 citation_hit 字段：聚合要返回 None，而不是当成 0 分。"""
+    summary = metrics.summarize(
+        [
+            {
+                "expect_refusal": False,
+                "hit": True,
+                "rr": 1.0,
+                "page_hit": 1.0,
+                "retrieval_ms": 10.0,
+                "keyword_coverage": None,
+                "forbidden_hit": None,
+                "refusal": None,
+                "total_ms": None,
+            }
+        ]
+    )
+
+    assert summary["citation_hit_rate"] is None
+    assert summary["citation_precision"] is None
+    assert summary["keyword_pass_rate"] is None
+    assert summary["refusal_accuracy"] is None
+    assert summary["total_p50_ms"] is None
 
 
 def _valid_item(item_id: str = "x") -> dict:

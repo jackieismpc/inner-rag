@@ -62,6 +62,7 @@ from inner_rag.main import app
 from inner_rag.models import User
 from inner_rag.services.cache import embedding_cache, query_cache
 from inner_rag.services.embedding import embedding_service
+from inner_rag.services.lexical import lexical_index
 from inner_rag.services.rag import rag_service
 from inner_rag.services.vector_store import vector_service
 
@@ -164,9 +165,11 @@ def offline_providers(request: pytest.FixtureRequest) -> Iterator[None]:
     if request.node.get_closest_marker("live") is not None:
         query_cache.clear()
         embedding_cache.clear()
+        lexical_index.invalidate()
         yield
         query_cache.clear()
         embedding_cache.clear()
+        lexical_index.invalidate()
         return
 
     original_embeddings = embedding_service._embeddings
@@ -175,11 +178,14 @@ def offline_providers(request: pytest.FixtureRequest) -> Iterator[None]:
     rag_service._get_llm = fake_llm  # type: ignore[method-assign]
     query_cache.clear()
     embedding_cache.clear()
+    # 词面索引也是进程内缓存：不清掉，上一个用例入库的分块会被下一个用例检索到
+    lexical_index.invalidate()
     yield
     embedding_service._embeddings = original_embeddings
     rag_service._get_llm = original_get_llm  # type: ignore[method-assign]
     query_cache.clear()
     embedding_cache.clear()
+    lexical_index.invalidate()
 
 
 @pytest.fixture(scope="session", autouse=True)

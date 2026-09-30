@@ -23,6 +23,8 @@ src/inner_rag/
 │   ├── document.py    #   解析 → 分块 → 入库的编排与状态机（失败抛 DocumentProcessingError）
 │   ├── embedding.py   #   embedding 门面 + 缓存 + identity（含向量空间一致性校验）
 │   ├── vector_store/  #   向量库插件点：base 契约与共用语义 + zvec / chroma / memory 适配
+│   ├── lexical.py     #   词面检索（BM25，中文 bigram 分词，零依赖）；按库缓存倒排索引
+│   ├── retrieval.py   #   检索组合层：向量 ∪ 词面融合、阈值时机、词面启用门槛
 │   ├── cache.py       #   CacheBackend 契约 + memory 实现 + QueryCache / EmbeddingCache
 │   ├── task_queue.py  #   TaskQueue 契约 + inprocess / inline 实现
 │   ├── rag.py         #   检索 → Prompt 组装 → LLM 生成（含流式）
@@ -200,6 +202,7 @@ class VectorStore(Protocol):
 | `cosine_similarity` / `maximal_marginal_relevance` | MMR（`λ·sim(query,d) - (1-λ)·max sim(d,已选)`） |
 | `merge_hybrid` | 相似度结果 + MMR 去重补充到 k 条（补入项分数为 `None`） |
 | `chunk_key` | 混合检索去重用的分块标识 |
+| `iter_chunks` | 读出整库分块（离线读路径，**不在检索热路径**）：词面检索建倒排索引用 |
 
 三个后端的实现映射（as-built，细节见各自模块 docstring）：
 
@@ -210,6 +213,7 @@ class VectorStore(Protocol):
 | `count` | `collection.stats.doc_count` | `collection.count()` | `len(bucket)` |
 | `delete_document` | 先 `iter_docs` 数出分块数，再 `delete_by_filter('doc_id = "…"')` | `collection.delete(where=...)` | 按 `doc_id` 过滤后从 dict 删除 |
 | `delete_kb` | `collection.destroy()`（删磁盘目录 + 释放句柄） | 删除 collection | `dict.pop(kb_id)` |
+| `iter_chunks` | `collection.iter_docs(include_vector=False)` 流式扫描后一次性返回 | `collection.get(include=["documents","metadatas"])` | `list(bucket.values())` 的 document 字段 |
 
 memory 后端的边界（写清楚，避免被当成生产后端）：数据只在进程内存、**重启即丢**；线性扫描只适合
 几千分块；每个实例各持一份数据、**实例之间不共享**（用例 `test_memory_backend_instances_are_isolated`
@@ -229,6 +233,49 @@ zvec 适配器的几个非直觉点（改动前先看 `zvec_store.py` 模块 doc
 
 HNSW + cosine 是适配器内的固定选择，路径来自 `settings.ZVEC_PATH` / `CHROMA_PERSIST_DIR`；
 换 embedding 导致的向量空间变化由 `services/embedding.py` 的 `EmbeddingIdentityMismatch` 拦住。
+
+### 3.2.1 检索组合层：向量 ∪ 词面（Phase 8.1）
+
+`VectorStore.search` 只回答「**这个向量库**怎么查」；「这次查询该用哪几路召回、怎么合成一个可比较的
+分数」是业务决策，放在 `services/retrieval.py`：
+
+```
+services/retrieval.py::search(kb_id, query, k, strategy, score_threshold, filter_doc_ids)
+    ├── vector_service.search(..., score_threshold=0.0)   # 阈值不在这里生效
+    ├── [前置门] dense_support or 词面最强匹配 >= HYBRID_MIN_SPARSE_SCORE
+    │       └── lexical_index.search(...) → normalize_scores(...) × HYBRID_SPARSE_WEIGHT
+    ├── fuse(dense, sparse, k)                            # 按 chunk_key 去重，取两侧较大分
+    └── finalize_results(fused, threshold)                # 阈值在融合之后统一生效
+```
+
+三条不变量（都有单测钉住，见 `tests/test_retrieval.py`）：
+
+1. **阈值只在融合后生效**：传给向量库的 `score_threshold` 恒为 `0.0`。先按阈值过滤再融合，会把
+   「向量分低但词面完全匹配」的候选提前丢掉，而补上这一路正是融合的目的。
+2. **分数必须同量纲**：BM25 是无上界的（实测单题最高 82.4），先归一到 `[0, 1]` 再乘权重，
+   否则 `RETRIEVAL_SCORE_THRESHOLD` 对两路召回不是同一把尺子。
+3. **词面是补充，不是独立召回源**：两路里至少要有一路拿出实质证据才启用词面
+   （稠密侧有过阈值候选，或词面最强匹配 ≥ `HYBRID_MIN_SPARSE_SCORE`）。缺了这条，
+   归一化保证的「词面第一名恒为权重值」会让任何字面重叠过的 chunk 必然进 context，
+   把「库里没有相关内容」翻案成假召回——**实测拒答正确率 100% → 0%**。
+   标定数据与被挡下的两次尝试见 `docs/evaluation.md` 4.5 / 7.1。
+
+`strategy` 对外语义不变：`similarity` 纯向量、`mmr` 纯向量 + 多样性、`hybrid` = 向量 ∪ 词面
+（向量侧内部仍是「相似度 + MMR 补位」，见 `merge_hybrid`）。**问答、基准、探针脚本共用这一条路径**，
+所以「评测涨了、线上没变」这类偏差不会出现——`rag_service.retrieve` 与 `benchmark/run_bench.py`
+都调 `retrieval.search`。
+
+`services/lexical.py`（词面检索）的两个设计取舍：
+
+- **分词用中文 bigram，不引分词器**：字 bigram（「陈墨瞳」→ 陈/墨/瞳/陈墨/墨瞳）对专名足够，
+  零依赖、确定性、可离线测；第三方词典对小说专名反而会切错。拉丁字母与数字按词切并小写；
+  单字也保留一份（query 只有单个汉字时 bigram 为空）。换行不切断 bigram——先取字序列再组 bigram，
+  所以正文里「陈墨\n瞳」这种跨行排版仍能匹配。
+- **索引按知识库缓存在进程内**，由 `VectorStore.iter_chunks` 建一次。内容变化时必须
+  `lexical_index.invalidate(kb_id)`，调用点与 `query_cache.invalidate_kb*` 成对出现
+  （入库完成、删文档、删库、重建脚本、清缓存接口）；漏掉会变成「入库了却检索不到」。
+  与 memory 缓存后端同一约束：**进程内缓存只能清本进程那份**，多进程部署要重启或走清缓存接口
+  （见 §6）。
 
 ### 3.3 关系库与 Repository
 

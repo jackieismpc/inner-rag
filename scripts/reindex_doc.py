@@ -16,6 +16,7 @@ from inner_rag.core.database import SessionLocal
 from inner_rag.repositories import build_repositories
 from inner_rag.services.cache import query_cache
 from inner_rag.services.document import DocumentProcessingError, doc_service
+from inner_rag.services.lexical import lexical_index
 from inner_rag.services.vector_store import vector_service
 
 
@@ -38,6 +39,8 @@ async def reindex_doc(doc_id: int) -> None:
         logger.error(f"重建失败: {exc}")
 
     await query_cache.invalidate_kb(kb_id)
+    # 同上：只清本进程的索引，服务端那份需由 /api/system/cache 或重启丢弃
+    lexical_index.invalidate(kb_id)
 
     with SessionLocal() as db:
         doc = build_repositories(db).docs.get(doc_id)

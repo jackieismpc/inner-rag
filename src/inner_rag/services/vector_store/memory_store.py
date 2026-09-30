@@ -157,6 +157,9 @@ class MemoryVectorStore:
     def list_doc_ids(self, kb_id: int) -> list[str]:
         return sorted({chunk.doc_id for chunk in self._kbs.get(kb_id, {}).values()})
 
+    def iter_chunks(self, kb_id: int) -> list[Document]:
+        return [chunk.document for chunk in self._kbs.get(kb_id, {}).values()]
+
 
 def _distance(item: tuple[_StoredChunk, float]) -> float:
     return item[1]

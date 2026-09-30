@@ -17,14 +17,14 @@
 
 不设用例数量目标；README 里的用例数只是**现状快照**，不是 KPI。
 
-现状（Phase 0–7，用例数是快照不是目标）：
+现状（Phase 0–8.1，用例数是快照不是目标）：
 
 - `pyproject.toml` 里 `addopts = "-m 'not live'"`，即**默认只跑离线用例**；
 - `markers` 已注册 `live`；`live` 用例必须显式 `-m live` 才执行；
 - `tests/conftest.py` 强制把 `LLM_PROVIDER` / `EMBEDDING_PROVIDER` 钉成 `mock`、设置
   `EMBEDDING_MAX_INPUT_CHARS`、并把 `TASK_QUEUE_BACKEND` 设为 `inline`
   （后台任务在请求内同步跑完，用例不必等队列），保证**不受开发者本机 `.env` 影响**；
-- 用例数快照：**234 个离线用例**（Phase 7 后），其中登录 / 鉴权 / ACL 在 `tests/test_auth.py`
+- 用例数快照：**279 个离线用例**（Phase 8.1 后），其中登录 / 鉴权 / ACL 在 `tests/test_auth.py`
   （多为参数化路由表，例如「11 条受保护路由全部 401」是一条用例的参数化而不是 11 条用例）；
 - **契约测试参数化跑所有实现**，这是 Phase 7 的核心验收方式：
   - 向量库 `tests/test_vector_store.py`：`store` fixture 参数化跑 `zvec / chroma / memory`，
@@ -35,8 +35,18 @@
     `reset_kb_for_reprocess` 不跨库误伤、删库级联），验证用**新开会话**读回，避免只验证身份映射缓存；
   - 插件注册表 `tests/test_plugins.py`：撞名抛错、entry point 失败跳过、同名保留内置，
     以及一个第三方 provider 只靠注册 + 改配置就跑通「建库 → 上传 → 提问」的端到端演练；
+- 检索组合层与词面检索（Phase 8.1，两路都要有失效场景才写用例）：
+  - `tests/test_lexical.py`：分词（中文 bigram 跨换行也成立、拉丁词小写、标点忽略）、
+    BM25 排序与**分数无上界**、`filter_doc_ids` 过滤、索引按库缓存与 `invalidate` 语义、
+    归一化把最大值映到 1.0；
+  - `tests/test_retrieval.py`：融合去重取较大分、`None`（MMR 补充项）排在最后、
+    **阈值在融合之后生效**（向量分低于阈值但词面完全匹配的分块必须能被救回）、
+    **词面启用门槛**（两路都无实质证据时不采信词面，尤其是负样本题的形状）、
+    以及三种策略各自是否调用词面（`similarity` 绝不调用、权重 0 = 显式关闭）；
+    用假后端 + 假索引，不需要真向量库或网络；
 - 测试库与向量库都用临时目录，不写 `./data`；跑完即清理；
-- `benchmark/` 的指标与评测集校验也有离线用例（`tests/test_benchmark_metrics.py`）；
+- `benchmark/` 的指标与评测集校验也有离线用例（`tests/test_benchmark_metrics.py`，
+  含 `citation_hit` 与 `citation_precision` 的口径差异、以及缺字段时聚合成 `None` 而不是 0 分）；
   `--mode fixtures` 的评测自检不在 pytest 里，要单独跑（见第 6 节）。
 
 ## 2. 目录与命名

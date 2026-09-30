@@ -86,16 +86,19 @@ def today() -> str:
 
 
 def console_table(record: dict[str, Any]) -> str:
-    """逐题明细（终端里看哪道题失败了）。"""
-    lines = [f"{'id':<24} {'检索':<4} {'页命中':<7} {'要点':<6} {'引用':<6} {'检索耗时':<10}"]
+    """逐题明细（终端里看哪道题失败了）。
+
+    「引用」列给的是**引用命中**（0/1）而不是引用精度：精度在一道题只引用了 1 条来源时
+    会显示 100%，在一条都没引用时显示 0%，两个极端都不是「引对了没有」的答案。
+    """
+    lines = [f"{'id':<24} {'检索':<4} {'页命中':<7} {'要点':<6} {'引用命中':<8} {'检索耗时':<10}"]
     for item in record["items"]:
         keyword = "—" if item.get("keyword_coverage") is None else f"{item['keyword_coverage']:.0%}"
-        citation = (
-            "—" if item.get("citation_precision") is None else f"{item['citation_precision']:.0%}"
-        )
+        cited = item.get("citation_hit")
+        citation = "—" if cited is None else ("✓" if cited else "✗")
         lines.append(
             f"{item['id']:<24} {'✓' if item['hit'] else '✗':<4} {item['page_hit']:<7.2f} "
-            f"{keyword:<6} {citation:<6} {item['retrieval_ms']:.1f} ms"
+            f"{keyword:<6} {citation:<8} {item['retrieval_ms']:.1f} ms"
         )
     return "\n".join(lines)
 

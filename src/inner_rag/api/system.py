@@ -22,6 +22,7 @@ from inner_rag.providers import (
 )
 from inner_rag.providers.specs import ProviderError, chat_spec, embedding_spec
 from inner_rag.services.cache import embedding_cache, query_cache
+from inner_rag.services.lexical import lexical_index
 from inner_rag.services.retrieval_log import RetrievalStats
 from inner_rag.services.task_queue import task_queue
 
@@ -129,8 +130,10 @@ async def clear_cache(
     """手动清除缓存：指定 kb_id 仅清该知识库，否则全清。"""
     if kb_id is not None:
         cleared = await query_cache.invalidate_kb(kb_id)
+        lexical_index.invalidate(kb_id)
     else:
         cleared = query_cache.clear()
+        lexical_index.invalidate()
     return {"message": "缓存已清除", "cleared_keys": cleared}
 
 

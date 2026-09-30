@@ -260,6 +260,18 @@ class ZvecVectorStore:
         with collection.iter_docs(output_fields=["doc_id"], include_vector=False) as docs:
             return [str(doc.fields.get("doc_id")) for doc in docs]
 
+    def iter_chunks(self, kb_id: int) -> list[Document]:
+        """流式扫描整个 collection，还原成分块列表（正文 + 白名单元数据）。
+
+        建倒排索引用，不参与检索热路径：zvec 只能逐条扫，所以这次读的 O(n) 是刻意的，
+        代价由调用方（`services/lexical.py`）的按库缓存摊掉。
+        """
+        collection = self._existing(kb_id)
+        if collection is None:
+            return []
+        with collection.iter_docs(output_fields=_OUTPUT_FIELDS, include_vector=False) as docs:
+            return [_to_document(doc) for doc in docs]
+
 
 def _schema(kb_id: int, dimension: int) -> zvec.CollectionSchema:
     """知识库 collection 的 schema。

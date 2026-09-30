@@ -19,6 +19,7 @@ from inner_rag.models import DocStatus
 from inner_rag.repositories import Repositories, build_repositories
 from inner_rag.services.cache import query_cache
 from inner_rag.services.document import DocumentProcessingError, doc_service
+from inner_rag.services.lexical import lexical_index
 from inner_rag.services.vector_store import vector_service
 
 
@@ -52,6 +53,9 @@ async def reindex(kb_id: int, keep_vectors: bool = False) -> int:
             logger.warning(f"  doc_id={doc_id} 重建失败：{exc}")
 
     await query_cache.invalidate_kb(kb_id)
+    # 词面索引是进程内缓存：脚本只能清掉自己进程里的那份，正在跑的 API 进程需重启或调
+    # /api/system/cache 清除（与 memory 缓存后端同一约束，见 docs/architecture.md §6）
+    lexical_index.invalidate(kb_id)
 
     with SessionLocal() as db:
         failed = _report(build_repositories(db), kb_id)

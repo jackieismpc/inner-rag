@@ -292,7 +292,9 @@ TOKEN=$(curl -s -X POST localhost:8010/api/auth/login \
 | `TASK_QUEUE_MAX_RETRIES` / `TASK_QUEUE_RETRY_BACKOFF` | `1` / `5.0` | 失败重试次数与退避系数（`backoff × attempt` 秒） |
 | `TASK_QUEUE_HISTORY` | `200` | 任务历史环形缓冲大小（`/api/system/stats` 展示） |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `200` | 分块参数，影响召回粒度；改动后建议重建索引并跑基准 |
-| `RETRIEVAL_SCORE_THRESHOLD` | `0.3` | 相关度阈值（`1 - 余弦距离`）；过高会导致空召回 |
+| `RETRIEVAL_SCORE_THRESHOLD` | `0.3` | 相关度阈值；Phase 8.1 起作用在**融合后**的分数上（`max(向量相关度, 权重 × 归一化 BM25)`） |
+| `HYBRID_SPARSE_WEIGHT` | `0.6` | hybrid 策略里词面检索（BM25）的权重，`0` = 退回纯向量 + MMR；定标见 `docs/evaluation.md` 4.5 |
+| `HYBRID_MIN_SPARSE_SCORE` | `20.0` | 词面这一路的启用门槛（原始 BM25）；低于它且稠密侧无过阈值候选时不启用，避免巧合匹配破坏拒答 |
 | `AUTO_CREATE_TABLES` | `false` | 表结构交给 Alembic；仅测试/一次性库设为 `true` |
 | `AUTH_SECRET_KEY` | `dev-only-insecure-...` | JWT 签名密钥（HS256）；`DEBUG=false` 时用默认值或短于 32 字节会**拒绝启动** |
 | `AUTH_TOKEN_TTL_MINUTES` | `720` | 令牌有效期（分钟）；JWT 无状态、无法单独撤销，短 TTL 是泄漏后的唯一收敛手段 |
@@ -489,10 +491,24 @@ uv run scripts/eval_answer.py --from-result benchmark/results/<上面的结果 j
 | 日期 | 配置 | 题数 | Recall@k | MRR | 页命中率 | 要点命中率 | 引用精度 | 拒答正确率 | 检索 p50 | 检索 p95 | 端到端 p50 | 结果文件 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 2026-09-30 | kb1/openrouter:liquid/lfm-2.5-embedding-350m:free/hybrid/k=8+answer | 9 | 75.0% | 0.688 | 62.5% | 75.0% | 27.5% | 100.0% | 1238.6 ms | 2176.1 ms | 1442.6 ms | `benchmark/results/2026-09-30-kb-kb1-openrouter-liquid-lfm-2-5-embedding-350m-free-hybrid-k-8-answer.json` |
+| 2026-09-30 | kb1/openrouter:liquid/lfm-2.5-embedding-350m:free/hybrid/w=0.6/k=8+answer | 9 | 100.0% | 0.745 | 87.5% | 100.0% | 20.0% | 100.0% | 1259.0 ms | 1637.7 ms | 1363.2 ms | `benchmark/results/2026-09-30-kb-kb1-openrouter-liquid-lfm-2-5-embedding-350m-free-hybrid-w-0-6-k-8-answer.json` |
 <!-- END BENCHMARK -->
 
 表格由 `--update-readme` 写入，**不要手工编辑标记之间的区域**；kb 模式每次还在 `benchmark/results/`
 留一份含逐题明细的 JSON，便于回溯。指标口径与注意事项见 `benchmark/README.md`。
+
+**做实验一定要带 `--label`**：行按「日期 + 配置」去重，不传 label 时用的是按配置自动拼出来的名字，
+两次跑的配置一样就会**覆盖上一行**——「改动前」那一行会因此丢掉。上面的 w=0 / w=0.6 两行就是这样
+留成对照的。
+
+**读表注意两件事**：
+
+1. **`引用精度` 不可跨配置比较**。它的分母是「本题引用了多少条来源」，而召回变好会让原本一条都没引用
+   的题（记 0.0）变成引满 5 条（记 1/5），分母随配置漂移。Phase 8.1 那两行的引用精度 27.5% → 20.0%
+   就是这么来的；同期可比口径「引用的来源里至少一条命中期望页」的题占比是 **75.0% → 87.5%**，
+   该口径已落成 `metrics.spans_citation_hit`（逐题结果里的 `citation_hit`，`--answer` 时打印为「引用命中」）。
+2. **`hybrid` 起词面融合（Phase 8.1）**：`w=0` 那一行是关闭词面的纯向量配置，用于对照；
+   词面这一路有启用门槛，细节与标定数据见 `docs/evaluation.md` 4.5 / 7.1。
 
 回答侧的 judge 正确性 / 忠实度 / 失败归因在 `docs/reports/eval-*.md`，建库的页窗口与配置快照在
 `docs/reports/eval-kb-*.json`。**引用里的页码是源 PDF 的物理页号**（不是子 PDF 的局部页号），

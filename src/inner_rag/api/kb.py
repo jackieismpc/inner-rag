@@ -29,6 +29,7 @@ from inner_rag.schemas import (
     UserOut,
 )
 from inner_rag.services.cache import query_cache
+from inner_rag.services.lexical import lexical_index
 from inner_rag.services.vector_store import vector_service
 
 router = APIRouter(prefix="/api/kb", tags=["知识库"])
@@ -128,6 +129,7 @@ async def delete_kb(
     shutil.rmtree(Path(settings.UPLOAD_DIR) / f"kb_{kb_id}", ignore_errors=True)
     repos.kbs.delete(kb)
     query_cache.invalidate_kb_sync(kb_id)
+    lexical_index.invalidate(kb_id)
     logger.info(f"[KB] 删除知识库 id={kb_id} owner={user.username}")
     return ResponseModel(message="删除成功")
 

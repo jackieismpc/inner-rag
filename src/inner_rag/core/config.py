@@ -124,7 +124,15 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP: int = 200
     TOP_K: int = 8  # 向量召回数量
     RERANK_TOP_K: int = 5  # 进入 context 的条数
-    RETRIEVAL_SCORE_THRESHOLD: float = 0.3  # cosine 相似度阈值
+    RETRIEVAL_SCORE_THRESHOLD: float = 0.3  # 融合后分数的阈值（向量相关度 / 归一化 BM25）
+    # hybrid 策略里词面检索（BM25）的权重：融合分数 = max(向量相关度, 权重 × 归一化 BM25)。
+    # 0 = 退回纯向量 + MMR。0.6 是实测平台 [0.55, 0.7] 的中点：< 0.51 时目标页会被向量侧的
+    # 弱相关分挤出 Top-k，> 0.8 时词面第一名开始压过向量第一名、MRR 下滑（见 docs/evaluation.md 4.5）。
+    HYBRID_SPARSE_WEIGHT: float = 0.6
+    # 词面这一路的启用门槛（原始 BM25，归一化之前）：两路里至少要有一路拿出「实质证据」，
+    # 否则词面不该把「库里没有相关内容」翻案成一条假召回。判据是 (稠密侧有过阈值候选)
+    # 或 (词面最强匹配 ≥ 本值)。标定依据与它的局限见 docs/evaluation.md 4.5。
+    HYBRID_MIN_SPARSE_SCORE: float = 20.0
     MAX_CONTEXT_LENGTH: int = 6000  # context 最大字符数
     HISTORY_MAX_MESSAGES: int = 20  # 送入模型的历史消息条数（最近 N 条）
 

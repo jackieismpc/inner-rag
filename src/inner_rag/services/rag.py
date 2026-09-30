@@ -5,12 +5,16 @@ OpenRouter、DeepSeek、OpenAI 还是离线 mock。
 
 Phase 5 起本模块同时是 **trace 的主干**：一次问答产生
 
-    rag.request -> retrieve -> (cache.query | vector.search -> embed.query)
+    rag.request -> retrieve -> (cache.query | vector.search -> [embed.query, lexical.search])
                 -> prompt.build -> llm.generate
 
-（``embed.query`` 由 ``services/embedding.py`` 自己埋，它天然嵌在 ``vector.search`` 里。）
+（``embed.query`` 由 ``services/embedding.py`` 自己埋，它天然嵌在 ``vector.search`` 里；
+``lexical.search`` 只在 ``hybrid`` 策略下出现，是向量召回之外的那一路词面召回。）
 检索耗时、空召回、token 用量、首 token 延迟这些指标也落在这里——只有这里同时知道
 「用了什么参数」和「拿到了什么结果」。
+
+检索本身不在本模块实现：``retrieve`` 只负责缓存与埋点，真正的召回组合交给
+``services/retrieval.py``（向量 ∪ 词面），这样问答、基准、探针脚本跑的是同一条路径。
 """
 
 from __future__ import annotations
@@ -20,7 +24,6 @@ import time
 from collections.abc import AsyncGenerator
 from typing import Any, cast
 
-from langchain_core.documents import Document
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.output_parsers import StrOutputParser
@@ -31,9 +34,11 @@ from inner_rag.core.metrics import metrics, record_llm_tokens
 from inner_rag.core.observability import tracer
 from inner_rag.providers import get_chat_model
 from inner_rag.providers.specs import chat_spec
+from inner_rag.services import retrieval
 from inner_rag.services.cache import query_cache
+from inner_rag.services.retrieval import RetrievalResult
 from inner_rag.services.retrieval_log import log_prompt, log_retrieval
-from inner_rag.services.vector_store import Strategy, vector_service
+from inner_rag.services.vector_store import Strategy
 from inner_rag.services.vector_store.base import page_span
 
 
@@ -66,7 +71,7 @@ SYSTEM_PROMPT = """你是企业内部知识库助手，请根据以下参考文�
 DEFAULT_STRATEGY: Strategy = "hybrid"
 PROMPT_HISTORY_TURNS = 3
 
-RetrievalResult = list[tuple[Document, float | None]]
+# 结果类型由检索层定义（rag 只是消费方），避免同一语义两处声明
 
 
 def sse_event(event_type: str, data: Any) -> str:
@@ -147,7 +152,8 @@ class RAGService:
             async with tracer.span(
                 "vector.search", kb_id=kb_id, strategy=strategy, k=k
             ) as search_span:
-                results, filtered_out = await vector_service.search(
+                # 向量 ∪ 词面（hybrid）的组合在检索层完成，这里只关心「拿到了什么」
+                results, filtered_out = await retrieval.search(
                     kb_id=kb_id,
                     query=query,
                     k=k,

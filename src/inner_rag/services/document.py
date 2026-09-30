@@ -28,6 +28,7 @@ from inner_rag.models import DocStatus
 from inner_rag.repositories import DocumentRepository, NewDocument, Repositories, build_repositories
 from inner_rag.services.cache import query_cache
 from inner_rag.services.embedding import ensure_embedding_matches
+from inner_rag.services.lexical import lexical_index
 from inner_rag.services.parser import parser
 from inner_rag.services.task_queue import task_queue
 from inner_rag.services.vector_store import vector_service
@@ -173,7 +174,9 @@ class DocumentService:
             docs.sync_kb_doc_count(doc.kb_id)
 
             # 新内容入库后必须让检索缓存失效，否则会持续返回旧结果
+            # （词面索引同样由库内容派生，漏掉它会让 BM25 一路继续命中过期分块）
             await query_cache.invalidate_kb(doc.kb_id)
+            lexical_index.invalidate(doc.kb_id)
             metrics.increment("rag_ingest_documents_total", labels={"status": "completed"})
             logger.info(f"[DOC] 处理完成: {doc.filename}, chunks={chunk_count}")
             return True
@@ -261,6 +264,7 @@ class DocumentService:
         docs.delete(doc)
         docs.sync_kb_doc_count(kb_id)
         query_cache.invalidate_kb_sync(kb_id)
+        lexical_index.invalidate(kb_id)
         return True
 
 

@@ -40,10 +40,20 @@ uv run python -m benchmark.run_bench --mode kb --kb-id 3 --answer --update-readm
 # 调参对比：同一张表里多一行，便于看「改动前 / 改动后」
 uv run python -m benchmark.run_bench --mode kb --kb-id 3 --strategy hybrid --threshold 0.25 --answer \
   --label "hybrid/k=8/th=0.25" --update-readme
+
+# 阈值定标：一次未过滤检索反推整条阈值曲线（不花 LLM 的钱，只跑检索）
+uv run python -m benchmark.run_bench --mode kb --kb-id 3 --threshold-sweep
+uv run python -m benchmark.run_bench --mode kb --kb-id 3 --threshold-sweep 0,0.1,0.2,0.3
 ```
 
 `--label` 会作为 README 表格里的「配置」列；不传则按 `kb<id>/<embedding>/<strategy>/k=<k>` 自动生成。
+**做实验务必显式传 `--label`**：行按「日期 + 配置」去重，配置相同就会覆盖上一行（对照行会丢）。
 其余参数：`--dataset`、`--fixtures-dir`、`--k`、`--out-dir`。
+
+`--threshold-sweep` 的原理：阈值过滤发生在 Top-k **之后**（`finalize_results` 先滤后排），
+所以一次 `threshold=0` 的召回就含全部信息——对任一阈值 t，丢掉 `score < t` 的条目再重算命中判定，
+与真的按 t 检索完全一致，不必为每个候选阈值各跑一遍（省时也省钱）。曲线随结果 JSON 一起落盘
+（`threshold_curve`），下次想换网格不必重跑检索。不带值用内置网格，也可以在参数后直接给逗号分隔的列表。
 
 ## 指标口径
 
@@ -53,10 +63,15 @@ uv run python -m benchmark.run_bench --mode kb --kb-id 3 --strategy hybrid --thr
 | `MRR` | 第一条命中结果的倒数排名（逐题平均） | 是 |
 | 页命中率 | 命中的期望页数 / 期望页总数（多锚点题反映证据是否被拆散） | 是 |
 | 要点命中率 | `answer_keywords` 全部出现在回答中的题目比例（需 `--answer`） | 是 |
+| **引用命中率** | 引用的来源里**至少一条**命中期望页的题目比例（需 `--answer`） | 是 |
 | 引用精度 | 引用到的期望页 / 引用的全部页（需 `--answer`） | 是 |
 | 拒答正确率 | 负样本里正确表达「文档中没有相关信息」的比例（需 `--answer`） | 是 |
 | 检索 p50 / p95 | 单题检索耗时（毫秒） | 否（越低越好） |
 | 端到端 p50 | 单题「检索 + 生成」耗时（需 `--answer`） | 否 |
+
+**引用命中率与引用精度要一起看**：精度按「引用条数」算分母，一道题只引用了 1 条时显示 100%、
+一条都没引用时显示 0%，分母随配置漂移，**不能跨配置比较**。命中率是 0/1 判定、分母恒为题数，
+与 `Recall@k` 同口径。终端逐题表打的是命中率，正是为了避免被精度的两个极端误导。
 
 ## 注意事项
 
