@@ -40,6 +40,9 @@ os.environ.update(
         "EMBEDDING_PROVIDER": "mock",
         "EMBEDDING_MAX_INPUT_CHARS": "0",
         "VECTOR_STORE": "zvec",
+        # 追踪与日志格式同理：开发者本机开了 LangSmith 也不能让离线用例联网
+        "LANGSMITH_TRACING": "false",
+        "LOG_FORMAT": "text",
     }
 )
 
