@@ -63,7 +63,7 @@ hybrid 的融合规则是 `max(向量相关度, 权重 × 归一化 BM25)`，阈
 | --- | --- |
 | 🐍 语言 / 包管理 | Python 3.13（uv 管理）、`uv.lock` 锁定依赖 |
 | 🌐 Web 框架 | FastAPI 0.141+、Uvicorn 0.54+、SSE 流式响应 |
-| 🤖 LLM 编排 | LangChain 1.x + `langchain-ollama` / `langchain-openai`（云端 + 本地 vLLM/SGLang）/ `langchain-deepseek` |
+| 🤖 LLM 编排 | LangChain 1.x + `langchain-ollama` / `langchain-openai`（云端 + 本地SGLang）/ `langchain-deepseek` |
 | 🗄️ 向量库 | **zvec 0.7.0**（[Alibaba 开源](https://github.com/alibaba/zvec)，HNSW + cosine，默认）；ChromaDB 1.5+ 与 `memory`（零依赖进程内）为兼容实现 |
 | 🗃️ 关系库 | SQLite（开发默认）+ PostgreSQL 16（部署可选）+ SQLAlchemy 2.1 + Alembic 1.20 |
 | 🔑 认证与权限 | JWT（PyJWT，HS256）+ argon2id（argon2-cffi）+ 知识库级 ACL |
